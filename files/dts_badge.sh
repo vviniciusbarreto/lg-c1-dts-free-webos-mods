@@ -3,7 +3,9 @@
 #  - DTS: follows the decision dts_restore_plus' dtsdec writes to /run/dtsc1/last-decision.
 #  - Dolby Digital / Dolby Digital Plus / Dolby Atmos: follows the audio "setDecodeInfo" lines in the dbg-log.
 # Turn all badges off:      touch /var/lib/webosbrew/dts_badge/disabled
+#  - HDMI inputs (e.g. a console): follows audiooutputd's "setAudioInputInfo" lines (sourceType HDMI).
 # Turn Dolby badges off:    touch /var/lib/webosbrew/dts_badge/disabled_dolby
+# Turn HDMI badges off:     touch /var/lib/webosbrew/dts_badge/disabled_hdmi
 DIR=/var/lib/webosbrew/dts_badge
 DEC=/run/dtsc1/last-decision
 DBG=/tmp/var/log/dbg-log
@@ -59,6 +61,32 @@ smart_wait() {
   done
 }
 
+# HDMI inputs: no pipeline / track events there, so the anchor is the format change itself.
+# LG's HDR / Dolby Vision badge for the input (if any) may come just before or after it: if one shows up
+# from 8 s before the change to 12 s after it, ours goes 6.0 s after it; with none (SDR), after ~12 s.
+hdmi_wait() { # $1 = [seconds] of the format change
+  k=0
+  while [ $k -lt 48 ]; do
+    nat=$(line_up "$NATIVE" 0)
+    if [ -n "$nat" ] && awk -v a="$1" -v x="$nat" 'BEGIN{ exit !(x >= a - 8) }'; then
+      us=$(awk -v x="$nat" -v n="$(up_now)" 'BEGIN{ d = x + 6.0 - n; if (d < 0) d = 0; printf "%d", d * 1000000 }')
+      [ "$us" -gt 0 ] && usleep "$us"
+      return
+    fi
+    usleep 250000; k=$((k+1))
+  done
+}
+last_hdmi_line() { tail -n 3000 "$DBG" 2>/dev/null | grep 'audiooutputd.*setQualityAttribute request.*categoryInfo.*"sourceType":"HDMI"' | tail -n 1; }
+hdmi_msg() { # $1 = codec, $2 = immersive
+  case "$1" in
+    mat_atmos*|matatmos*|mat*) echo "Dolby Atmos" ;;
+    eac3*|ec3|ddp) [ -n "$2" ] && [ "$2" != "none" ] && echo "Dolby Atmos" || echo "Dolby Digital Plus" ;;
+    ac3) echo "Dolby Digital" ;;
+    dts*) echo "DTS Digital Surround" ;;
+    *) [ -n "$2" ] && [ "$2" != "none" ] && echo "Dolby Atmos" ;;   # pcm / none: no badge
+  esac
+}
+
 last_audio_line() { tail -n 400 "$DBG" 2>/dev/null | grep "avc.main setDecodeInfo" | grep "contentType\[audio\]" | tail -n 1; }
 field() { echo "$1" | grep -o "$2[^,}]*" | head -n 1 | sed "s/$2//; s/[^a-zA-Z0-9]//g"; }   # codec / immersive
 
@@ -76,6 +104,7 @@ if [ -f "$DEC" ]; then
 fi
 # An audio track already playing at start: not shown.
 la=$(last_audio_line); last_audio_ts=${la%% *}
+lh=$(last_hdmi_line); last_hdmi_ts=${lh%% *}; hdmi_shown=""; hdmi_shown_at=0
 
 while :; do
   # --- DTS ---
@@ -125,6 +154,35 @@ while :; do
           log "audio [$ats codec=$codec immersive=$imm] -> '$dmsg' : $(toast "$dmsg" "$DOLBY_ICON")"
         fi
       fi
+    fi
+  fi
+  # --- HDMI inputs ---
+  lh=$(last_hdmi_line)
+  hts=${lh%% *}
+  if [ -n "$lh" ] && [ "$hts" != "$last_hdmi_ts" ]; then
+    last_hdmi_ts="$hts"
+    sleep 2   # a format change passes through "none"/"pcm" for an instant: wait until it settles
+    lh=$(last_hdmi_line); [ -n "$lh" ] && last_hdmi_ts=${lh%% *}
+    hcodec=$(field "$lh" codec); himm=$(field "$lh" immersive)
+    hin=$(echo "$lh" | sed -n 's/.*"contentType":"\(hdmi[0-9]*\)".*/\1/p')
+    hmsg=$(hdmi_msg "$hcodec" "$himm")
+    hup=$(echo "$lh" | sed -n 's/^[^ ]* \[\([0-9.]*\)\].*/\1/p')
+    now=$(date +%s)
+    if [ -z "$hmsg" ]; then
+      :   # pcm / none: nothing to show (and it does not reset the last badge)
+    elif [ -f "$DIR/disabled" ] || [ -f "$DIR/disabled_hdmi" ]; then
+      log "hdmi disabled: $hin codec=$hcodec immersive=$himm"
+    elif [ "$hin:$hmsg" = "$hdmi_shown" ] && [ $((now - hdmi_shown_at)) -lt 60 ]; then
+      log "hdmi: $hin back to $hmsg within 60 s - not repeated"
+    else
+      hdmi_wait "${hup:-0}"
+      if [ "$hmsg" = "Dolby Atmos" ] && [ "$(line_age 'NOTIFY_INVOKE.*SOURCE_ID":"com.webos.service.audio".*CONTENT":"[^"]*Atmos')" -lt 15 ]; then
+        log "hdmi: LG already showed an Atmos badge - nothing to do ($hin)"
+      else
+        icon=$DOLBY_ICON; [ "$hmsg" = "DTS Digital Surround" ] && icon=$ICON
+        log "hdmi [$hts $hin codec=$hcodec immersive=$himm] -> '$hmsg' : $(toast "$hmsg" "$icon")"
+      fi
+      hdmi_shown="$hin:$hmsg"; hdmi_shown_at=$(date +%s)
     fi
   fi
   sleep 1

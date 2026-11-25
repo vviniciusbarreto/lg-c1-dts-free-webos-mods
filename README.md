@@ -17,6 +17,7 @@ Tested on an LG OLED C1 (webOS 6, GStreamer 1.16) with a soundbar on eARC.
   - "DTS Digital Surround" when DTS goes straight to the receiver ("DTS Digital Surround (TV)" if the TV decodes it);
   - "Dolby Digital" (AC3), "Dolby Digital Plus" (E-AC3) and "Dolby Atmos" (E-AC3 with Atmos).
   The badge always comes after LG's HDR/Dolby Vision badge, never over it.
+  It also works for HDMI inputs (e.g. a console sending Dolby Atmos in passthrough, which LG itself does not badge).
 - **Post-boot eARC fix.** On some sets, after a cold boot the eARC link comes up without finishing the sync
   with the soundbar, and DTS passthrough turns into loud noise. Toggling "eARC Support" off and on fixes it;
   the script does that once, about a minute after boot (sound drops for ~3 s), and checks the result in the log.
@@ -59,6 +60,7 @@ Put `dts_icon.png` next to `install.sh` before installing. Without it the DTS ba
 |---|---|
 | All badges | `touch /var/lib/webosbrew/dts_badge/disabled` |
 | Dolby badges only | `touch /var/lib/webosbrew/dts_badge/disabled_dolby` |
+| HDMI input badges only | `touch /var/lib/webosbrew/dts_badge/disabled_hdmi` |
 | eARC fix | `touch /var/lib/webosbrew/dts_badge/disabled_earc_fix` |
 
 Logs: `/tmp/dts_badge.log`, `/tmp/earc_fix.log`.

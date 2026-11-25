@@ -17,6 +17,7 @@ Testado numa LG OLED C1 (webOS 6, GStreamer 1.16) com soundbar no eARC.
   - "DTS Digital Surround" quando o DTS vai direto para o receiver (ou "DTS Digital Surround (TV)" se a TV decodificar);
   - "Dolby Digital" (AC3), "Dolby Digital Plus" (E-AC3) e "Dolby Atmos" (E-AC3 com Atmos).
   O selo entra depois do selo HDR/Dolby Vision da LG, nunca por cima.
+  Vale também para as entradas HDMI (ex.: um console mandando Dolby Atmos em passthrough, que a LG não avisa).
 - **Correção do eARC depois do boot.** Em algumas TVs, depois de um boot completo, o eARC conecta sem concluir
   a sincronia com a soundbar e o DTS em passthrough vira chiado. Desligar e religar "Compatibilidade com eARC"
   resolve; o script faz isso sozinho ~1 min depois do boot (o som some por ~3 s uma vez) e confere no log.
@@ -59,6 +60,7 @@ Coloque o `dts_icon.png` ao lado do `install.sh` antes de instalar. Sem ele, o s
 |---|---|
 | Todos os selos | `touch /var/lib/webosbrew/dts_badge/disabled` |
 | Só os selos Dolby | `touch /var/lib/webosbrew/dts_badge/disabled_dolby` |
+| Só os selos das entradas HDMI | `touch /var/lib/webosbrew/dts_badge/disabled_hdmi` |
 | Correção do eARC | `touch /var/lib/webosbrew/dts_badge/disabled_earc_fix` |
 
 Logs: `/tmp/dts_badge.log`, `/tmp/earc_fix.log`.
