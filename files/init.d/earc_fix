@@ -1,0 +1,5 @@
+#!/bin/sh
+# Starts the post-boot eARC fix in the background. Always exits 0.
+[ -x /var/lib/webosbrew/dts_badge/earc_fix.sh ] || exit 0
+setsid nohup /var/lib/webosbrew/dts_badge/earc_fix.sh </dev/null >/dev/null 2>&1 &
+exit 0

@@ -1,0 +1,6 @@
+#!/bin/sh
+# Runs dts_restore_plus' init script first in webosbrew's init.d queue (~10 s earlier at boot).
+# dts_restore_plus' own restore_dts still runs at the end of the queue; its init_dts.sh is idempotent.
+# Always exits 0 (at most 60 s), so it can never hold up the boot or trip webosbrew's failsafe.
+[ -x /var/lib/webosbrew/dts_restore/init_dts.sh ] && timeout -t 60 /var/lib/webosbrew/dts_restore/init_dts.sh </dev/null >/dev/null 2>&1
+exit 0

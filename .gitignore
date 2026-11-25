@@ -1,0 +1,3 @@
+# brand artwork is never committed: generate it locally (see README)
+*.png
+*.svg
