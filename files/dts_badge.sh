@@ -40,42 +40,35 @@ line_up() { # $1 = pattern, $2 = 1 to also search dbg-log.0.gz; prints the [seco
   [ -n "$l" ] && echo "$l" | sed -n 's/^[^ ]* \[\([0-9.]*\)\].*/\1/p'
 }
 NATIVE='NOTIFY_INVOKE.*SOURCE_ID":"com.webos.service.\(pqcontroller\|audio\)".*CONTENT":"\(HDR\|Dolby Vision\|HLG\)'
+# How LG chains its own toasts (SystemUI/Notification, NotificationView.qml + Services.qml): one toast on
+# screen at a time; a toast that arrives while another is showing goes to a queue and, 2000 ms later,
+# the one on screen is closed and the queued one comes in (and then stays its full 5000 ms). That is how
+# LG itself shows "HDR" and then "Dolby Atmos". So the right moment for ours is right AFTER LG's badge
+# has been sent: the system then gives LG's 2 s and slides ours in. Sent BEFORE LG's, ours would be the
+# one cut after 2 s. So: wait for LG's badge only when one is coming, and send ours right after it.
+wait_native() { # $1 = [seconds] of the event, $2 = how long to wait (s), $3 = how far before the event LG's may be (s)
+  k=0
+  while [ $k -lt $(($2 * 4)) ]; do
+    nat=$(line_up "$NATIVE" 0)
+    if [ -n "$nat" ] && awk -v a="$1" -v x="$nat" -v b="$3" 'BEGIN{ exit !(x >= a - b) }'; then usleep 300000; return; fi
+    usleep 250000; k=$((k+1))
+  done
+}
+video_is_sdr() { # the last video setDecodeInfo after the event says "none" (no HDR / DV): LG shows no badge
+  tail -n 3000 "$DBG" 2>/dev/null | grep "avc.main setDecodeInfo" | grep "contentType\[video\]" | tail -n 1 | grep -q '\\"none\\",\\"nonAdaptive\\"'
+}
 smart_wait() {
-  # LG's native badge (HDR / Dolby Vision / HLG) shows when a video opens and, for the audio service's
-  # "Dolby Vision", on every audio track change too; if ours shows first, LG's replaces it on screen.
-  # So, from the latest event (new pipeline < 20 s ago, or track change < 5 s ago), wait for the native
-  # badge (up to 12 s on open, 3 s on a track change) and call ours exactly 6.0 s after it
-  # (it slides in for 0.4 s, stays 5 s, slides out for 0.4 s): the same gap for DTS, AC3, DDP and Atmos.
+  # Films (apps): a new pipeline (< 20 s ago) gets LG's HDR / Dolby Vision badge unless the video is SDR;
+  # an audio track change (< 5 s ago) gets the audio service's "Dolby Vision" badge on DV titles.
   now=$(up_now); p=$(line_up start_pipeline_init 1); t=$(line_up SELECT_TRACK 1)
   set -- $(awk -v n="$now" -v p="${p:-0}" -v t="${t:-0}" 'BEGIN{ if (n-p < 20) print p, 12; else if (n-t < 5) print t, 3; else print 0, 0 }')
-  anchor=$1; win=$2; [ "$win" = 0 ] && return
-  k=0
-  while [ $k -lt $((win * 4)) ]; do
-    nat=$(line_up "$NATIVE" 0)
-    if [ -n "$nat" ] && awk -v a="$anchor" -v x="$nat" 'BEGIN{ exit !(x >= a - 0.5) }'; then
-      us=$(awk -v x="$nat" -v n="$(up_now)" 'BEGIN{ d = x + 6.0 - n; if (d < 0) d = 0; printf "%d", d * 1000000 }')
-      [ "$us" -gt 0 ] && usleep "$us"   # (busybox sleep takes whole seconds only)
-      return
-    fi
-    usleep 250000; k=$((k+1))
-  done
+  [ "$2" = 0 ] && return
+  [ "$2" = 12 ] && video_is_sdr && return
+  wait_native "$1" "$2" 0.5
 }
 
-# HDMI inputs: no pipeline / track events there, so the anchor is the format change itself.
-# LG's HDR / Dolby Vision badge for the input (if any) may come just before or after it: if one shows up
-# from 8 s before the change to 12 s after it, ours goes 6.0 s after it; with none (SDR), after ~12 s.
-hdmi_wait() { # $1 = [seconds] of the format change
-  k=0
-  while [ $k -lt 48 ]; do
-    nat=$(line_up "$NATIVE" 0)
-    if [ -n "$nat" ] && awk -v a="$1" -v x="$nat" 'BEGIN{ exit !(x >= a - 8) }'; then
-      us=$(awk -v x="$nat" -v n="$(up_now)" 'BEGIN{ d = x + 6.0 - n; if (d < 0) d = 0; printf "%d", d * 1000000 }')
-      [ "$us" -gt 0 ] && usleep "$us"
-      return
-    fi
-    usleep 250000; k=$((k+1))
-  done
-}
+# HDMI inputs: no pipeline / track events there; LG's HDR / DV badge for the input comes when the input
+# (re)starts, from a few seconds before the audio format change to ~3 s after it.
 last_hdmi_line() { tail -n 3000 "$DBG" 2>/dev/null | grep 'audiooutputd.*setQualityAttribute request.*categoryInfo.*"sourceType":"HDMI"' | tail -n 1; }
 hdmi_msg() { # $1 = codec, $2 = immersive
   case "$1" in
@@ -175,7 +168,7 @@ while :; do
     elif [ "$hin:$hmsg" = "$hdmi_shown" ] && [ $((now - hdmi_shown_at)) -lt 60 ]; then
       log "hdmi: $hin back to $hmsg within 60 s - not repeated"
     else
-      hdmi_wait "${hup:-0}"
+      wait_native "${hup:-0}" 3 8
       if [ "$hmsg" = "Dolby Atmos" ] && [ "$(line_age 'NOTIFY_INVOKE.*SOURCE_ID":"com.webos.service.audio".*CONTENT":"[^"]*Atmos')" -lt 15 ]; then
         log "hdmi: LG already showed an Atmos badge - nothing to do ($hin)"
       else
