@@ -9,6 +9,9 @@
 #  - PCM after bitstream: when an app that plays plain PCM (YouTube) starts right after a bitstream source
 #    (Dolby / Atmos passthrough) ended, nudges the digital output (Auto and back, ~0.3 s) so it is not muted.
 # Turn that fix off:        touch /var/lib/webosbrew/dts_badge/disabled_pcm_fix
+#  - DTS unlock: a DTS passthrough that starts right after Atmos/MAT or PCM (PS5, YouTube fix, boot) comes out of
+#    the soundbar as noise; switching the film to its AC3 track and back to DTS while it plays fixes it.
+# Turn that fix off:        touch /var/lib/webosbrew/dts_badge/disabled_dts_unlock
 DIR=/var/lib/webosbrew/dts_badge
 DEC=/run/dtsc1/last-decision
 DBG=/tmp/var/log/dbg-log
@@ -90,7 +93,11 @@ smart_wait() {
 
 # HDMI inputs: no pipeline / track events there; LG's HDR / DV badge for the input comes when the input
 # (re)starts, from a few seconds before the audio format change to ~3 s after it.
-last_hdmi_line() { dbg_cat | grep 'audiooutputd.*setQualityAttribute request.*categoryInfo.*"sourceType":"HDMI"' | tail -n 1; }
+# Audio input lines: read from audiod ("Call setQualityAttribute API with payload ... setAudioInputInfo"), not
+# from audiooutputd: the TV's log daemon stops audiooutputd's messages when it logs too much
+# ("NL_LOG_BLOCKED audiooutputd", seen 26/11 22:24) and from then on its lines (and setEArcOutputType) are gone.
+SRC='Call setQualityAttribute API.*setAudioInputInfo'
+last_hdmi_line() { dbg_cat | grep "$SRC" | grep '"sourceType":"HDMI"' | tail -n 1; }
 hdmi_msg() { # $1 = codec, $2 = immersive
   case "$1" in
     mat_atmos*|matatmos*|mat*) echo "Dolby Atmos" ;;
@@ -137,7 +144,49 @@ digital_nudge() {
   usleep 300000
   timeout -t 10 luna-send -n 1 luna://com.webos.settingsservice/setSystemSettings '{"category":"sound","settings":{"soundOutputDigital":"passThrough"}}' </dev/null 2>&1
 }
-earc_type_line() { dbg_cat | grep 'setEArcOutputType.*set codec type' | tail -n 1; }
+src_line() { dbg_cat | grep "$SRC" | grep -v '"codec":"none"' | tail -n 1; }   # last audio source that carried a format
+
+# --- DTS unlock ---
+# Measured on 26/11: dts_restore_plus sends DTS passthrough as "codec type: 1 ... mixer value is 0, output Ch:6"
+# (IEC 61937 inside PCM). Every clean DTS start came right after an AC3 track ("codec type: 2") or another DTS;
+# every noisy one came after Atmos/MAT (type 7, PS5 or the PCM fix), PCM (mixer value 1) or an eARC re-sync.
+# Toggling eARC did not help; picking the film's AC3 track and going back to DTS while it plays did, at once.
+# (Done while paused it did not.) So: on such a DTS start, flip to the AC3 track and back once it is playing.
+# The previous source is read from the audio input lines (audiod): ac3 = fine; DTS from an app (codec "pcm",
+# MEDIA) = fine only if that one was clean; anything else (mat_atmos, eac3, HDMI pcm, nothing since boot) = flip.
+unlock_uid=""; unlock_until=0; dts_clean=0
+dts_unlock_check() { # $1 = the DTS setDecodeInfo line (codec pcm); prepares the flip, done later in the loop
+  [ -f "$DIR/disabled_dts_unlock" ] && return
+  uid=$(echo "$1" | sed -n 's/.*"uid":"\([^"]*\)".*/\1/p'); [ -z "$uid" ] && return
+  # the last source before this DTS: skip only this film's own DTS lines (its AC3 track still counts)
+  prev=$(dbg_cat | grep "$SRC" | grep -v '"codec":"none"' | awk -v u="$uid" 'index($0, u) && index($0, "\"codec\":\"pcm\"") { next } { l = $0 } END { print l }')
+  [ -z "$prev" ] && prev=$(zcat "$DBG.1.gz" 2>/dev/null | grep "$SRC" | grep -v '"codec":"none"' | tail -n 1)
+  pc=$(field "$prev" codec); ps=$(echo "$prev" | sed -n 's/.*"sourceType":"\([A-Z]*\)".*/\1/p')
+  case "$pc:$ps" in
+    ac3:*) log "dts: came after AC3 - nothing to do"; dts_clean=1; return ;;
+    pcm:MEDIA) [ "$dts_clean" = 1 ] && { log "dts: came after a clean DTS - nothing to do"; return; } ;;
+  esac
+  dts_clean=0
+  ac3=$(dbg_cat | grep "handleAudioTrackInfoEvent" | grep "$uid" | grep 'audio/x-ac3' | tail -n 1 | sed -n 's/.*trackNo\[\([0-9]*\)\].*/\1/p')
+  if [ -z "$ac3" ]; then log "dts: came after ${pc:-nothing}/${ps:-?} but the film has no AC3 track to unlock it"; return; fi
+  dtsi=$(dbg_cat | grep "SELECT_TRACK" | grep "$uid" | grep 'audio' | tail -n 1 | sed -n 's/.*index[^0-9]*\([0-9]*\).*/\1/p')
+  unlock_uid=$uid; unlock_ac3=$ac3; unlock_dts=${dtsi:-0}; unlock_prev="${pc:-nothing}/${ps:-?}"
+  unlock_until=$(( $(date +%s) + 600 ))
+}
+play_state() { dbg_cat | grep 'getMediaInfo' | grep "\"mediaId\":\"$1\"" | tail -n 1 | sed -n 's/.*"mediaId":"'"$1"'","type":"media","playState":"\([a-z]*\)".*/\1/p'; }
+dts_unlock_run() {
+  [ -z "$unlock_uid" ] && return
+  st=$(play_state "$unlock_uid")
+  if [ "$st" = "unloaded" ] || [ "$(date +%s)" -gt "$unlock_until" ]; then log "dts: unlock dropped (film $st)"; unlock_uid=""; return; fi
+  [ "$st" = "playing" ] || return
+  r1=$(timeout -t 10 luna-send -n 1 luna://com.webos.media/selectTrack "{\"mediaId\":\"$unlock_uid\",\"type\":\"audio\",\"index\":$unlock_ac3}" </dev/null 2>&1 | grep -o '"returnValue":[a-z]*')
+  sleep 2
+  r2=$(timeout -t 10 luna-send -n 1 luna://com.webos.media/selectTrack "{\"mediaId\":\"$unlock_uid\",\"type\":\"audio\",\"index\":$unlock_dts}" </dev/null 2>&1 | grep -o '"returnValue":[a-z]*')
+  log "dts: came after $unlock_prev -> AC3 track $unlock_ac3 and back to DTS track $unlock_dts ($r1 $r2)"
+  unlock_uid=""; dts_clean=1
+  sleep 2   # our own track switches: no badges for them
+  last=$(cat "$DEC" 2>/dev/null); la=$(last_audio_line); last_audio_ts=${la%% *}
+}
 
 last_audio_line() { dbg_cat | grep "avc.main setDecodeInfo" | grep "contentType\[audio\]" | tail -n 1; }
 field() { echo "$1" | grep -o "$2[^,}]*" | head -n 1 | sed "s/$2//; s/[^a-zA-Z0-9]//g"; }   # codec / immersive
@@ -193,6 +242,9 @@ while :; do
       case "$cur" in
         *" passthrough"*) msg="DTS Digital Surround" ;;
         *) msg="DTS Digital Surround (TV)" ;;   # decoded by the TV, not passed through
+      esac
+      case "$cur" in *" passthrough"*)   # unlock first (the noise lasts until then), badge after
+        dl=$(last_audio_line); [ "$(field "$dl" codec)" = "pcm" ] && { dts_unlock_check "$dl"; dts_unlock_run; } ;;
       esac
       smart_wait
       log "dts [$cur] -> '$msg' : $(toast "$msg" "$ICON")"
@@ -301,23 +353,20 @@ while :; do
       fi
     fi
   fi
+  dts_unlock_run
   # --- PCM after bitstream (see digital_nudge) ---
   pcm=$(line_up 'alsa-wrapper.*PcmPrepare' 0)
   if [ -n "$pcm" ] && [ "$pcm" != "$last_pcm" ]; then
     last_pcm="$pcm"
-    et=$(earc_type_line); etu=$(up_of "$et")
+    et=$(src_line); etu=$(up_of "$et"); ec=$(field "$et" codec)
     dis=$(line_up 'UMI/disconnect' 0)
-    case "$et" in
-      *"mixer value is 0"*) bits=1 ;;
-      *) bits=0 ;;
-    esac
-    case "$et" in *"codec type: 1 "*) bits=0 ;; esac   # PCM (multichannel) is not bitstream
+    case "$ec" in pcm|unknown|"") bits=0 ;; *) bits=1 ;; esac   # ac3, eac3, mat_atmos, dts...: bitstream
     if [ $bits = 1 ] && [ -n "$dis" ] && newer "$dis" "$etu" && newer "$pcm" "$dis" && [ "$dis" != "$pcm_fixed_for" ]; then
       pcm_fixed_for="$dis"
       if [ -f "$DIR/disabled_pcm_fix" ]; then
-        log "pcm: PCM app after bitstream (eARC left as: ${et##*set codec type: }) - fix disabled"
+        log "pcm: PCM app after bitstream (last source: $ec) - fix disabled"
       else
-        log "pcm: PCM app after bitstream (eARC left as: ${et##*set codec type: }) -> digital output Auto/Pass Through : $(digital_nudge)"
+        log "pcm: PCM app after bitstream (last source: $ec) -> digital output Auto/Pass Through : $(digital_nudge)"
       fi
     fi
   fi
