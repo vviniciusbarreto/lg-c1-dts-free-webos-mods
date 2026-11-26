@@ -21,6 +21,16 @@ chmod 755 "$D/dts_badge.sh" "$D/earc_fix.sh"
 if [ -f "$HERE/dts_icon.png" ]; then cp -f "$HERE/dts_icon.png" "$D/dts_icon.png"; chmod 644 "$D/dts_icon.png"
 else echo "Note: no dts_icon.png next to install.sh; the DTS badge will show text only (see README, 'DTS icon')."; fi
 
+# The TV's log library cuts the messages of the services on its "blacklist" when they log a lot
+# (NL_LOG_BLOCKED); audiooutputd and audiod are on it, and the badges read their lines. Take only those two
+# off the writable copy of the list (the read-only one in /etc stays as it is); uninstall.sh puts it back.
+BL=/mnt/lg/cmn_data/whitelist/blacklist.txt
+if [ -f "$BL" ] && grep -q -x -E "audiooutputd|audiod" "$BL"; then
+  [ -f "$D/blacklist.txt.orig" ] || cp -p "$BL" "$D/blacklist.txt.orig"
+  grep -v -x -E "audiooutputd|audiod" "$BL" > "$BL.tmp" && cat "$BL.tmp" > "$BL"; rm -f "$BL.tmp"
+  echo "Log blacklist: audiooutputd and audiod taken off (takes effect after a reboot)."
+fi
+
 for f in 00-dts-early dts_badge earc_fix; do cp -f "$HERE/files/init.d/$f" "$I/$f"; chmod 755 "$I/$f"; done
 
 # (re)start the badge watcher now; a new one stops any running copy (the eARC fix only makes sense at boot)

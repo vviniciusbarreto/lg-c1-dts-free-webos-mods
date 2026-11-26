@@ -94,8 +94,11 @@ Logs: `/run/dts_badge/dts_badge.log`, `/run/dts_badge/earc_fix.log` (pasta só d
   MAT) terminou, muda `soundOutputDigital` para `auto` e volta para `passThrough`.
 - Renderizador do DTS: lê `/proc/aaudio/module/PCMREN_P0/status` ("Param : metadata type") e escreve
   `0x64040004 <tipo>` no arquivo de comando da instância do renderizador em `/proc/aaudio/instances`.
-- As entradas de áudio são lidas das chamadas `setQualityAttribute` do `audiod`: o serviço de log da TV pode bloquear
-  as mensagens do `audiooutputd` quando ele registra demais (`NL_LOG_BLOCKED`).
+- As entradas de áudio são lidas das chamadas `setQualityAttribute` do `audiod`. A biblioteca de log da TV
+  (libPmLogLib) corta as mensagens dos serviços da "lista negra" dela quando eles registram muito (`NL_LOG_BLOCKED`),
+  e o `audiooutputd` e o `audiod` estão nela. Por isso o `install.sh` tira só esses dois da cópia gravável da lista
+  (`/mnt/lg/cmn_data/whitelist/blacklist.txt`; o original fica em `dts_badge/blacklist.txt.orig`; a de `/etc/PmLogDaemon`,
+  só leitura, não é mexida). Vale depois de um reboot; o `uninstall.sh` devolve a lista.
 - eARC: alterna `eArcSupport` por `com.webos.settingsservice/setSystemSettings` e confere
   `audioDeviceType[sound_mode_sync]` nas mensagens do `arccontroller`.
 - Todos os scripts de inicialização saem sempre com 0, para não acionar o modo de segurança do webosbrew.

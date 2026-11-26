@@ -13,6 +13,8 @@ if [ -n "$v" ]; then
   id=$(sed -n 's/.*](\([0-9]*\)).*/\1/p' /proc/aaudio/module/PCMREN_P0/status 2>/dev/null | head -n 1)
   for d in /proc/aaudio/instances/*; do timeout -t 2 grep -qx "id=(int)$id" "$d/prop" 2>/dev/null && { echo "0x64040004 $v" > "$d/cmd"; break; }; done
 fi
+# put back the log blacklist as it was
+[ -f /var/lib/webosbrew/dts_badge/blacklist.txt.orig ] && cat /var/lib/webosbrew/dts_badge/blacklist.txt.orig > /mnt/lg/cmn_data/whitelist/blacklist.txt
 rm -rf /var/lib/webosbrew/dts_badge /run/dts_badge
 rm -f /tmp/dts_badge.log /tmp/dts_badge.log.tmp /tmp/dts_badge.pid /tmp/dts_badge.prev /tmp/dts_badge.prev.tmp /tmp/dts_badge.prev.key /tmp/earc_fix.log   # older versions
 echo "Removed. (dts_restore_plus is still installed; use its own uninstall.sh to remove it.)"

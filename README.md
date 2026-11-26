@@ -93,8 +93,11 @@ Logs: `/run/dts_badge/dts_badge.log`, `/run/dts_badge/earc_fix.log` (root-only f
   sets `soundOutputDigital` to `auto` and back to `passThrough`.
 - DTS renderer: reads `/proc/aaudio/module/PCMREN_P0/status` ("Param : metadata type") and writes
   `0x64040004 <type>` to the command file of the renderer's DSP instance under `/proc/aaudio/instances`.
-- Audio inputs are read from `audiod`'s `setQualityAttribute` calls: the TV's log daemon can block
-  `audiooutputd`'s messages when it logs too much (`NL_LOG_BLOCKED`).
+- Audio inputs are read from `audiod`'s `setQualityAttribute` calls. The TV's log library (libPmLogLib) cuts the
+  messages of the services on its blacklist when they log a lot (`NL_LOG_BLOCKED`), and both `audiooutputd` and
+  `audiod` are on it, so `install.sh` takes those two off the writable copy of the list
+  (`/mnt/lg/cmn_data/whitelist/blacklist.txt`, original kept as `dts_badge/blacklist.txt.orig`; the read-only one in
+  `/etc/PmLogDaemon` is untouched). It takes effect after a reboot; `uninstall.sh` puts the list back.
 - eARC: toggles `eArcSupport` through `com.webos.settingsservice/setSystemSettings` and checks for
   `audioDeviceType[sound_mode_sync]` in `arccontroller` messages.
 - Every startup hook always exits 0, so webosbrew's failsafe is never tripped.
