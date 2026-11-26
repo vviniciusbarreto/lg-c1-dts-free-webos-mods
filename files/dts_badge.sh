@@ -69,7 +69,7 @@ smart_wait() {
 
 # HDMI inputs: no pipeline / track events there; LG's HDR / DV badge for the input comes when the input
 # (re)starts, from a few seconds before the audio format change to ~3 s after it.
-last_hdmi_line() { grep 'audiooutputd.*setQualityAttribute request.*categoryInfo.*"sourceType":"HDMI"' | tail -n 1; }
+last_hdmi_line() { grep 'audiooutputd.*setQualityAttribute request.*categoryInfo.*"sourceType":"HDMI"' "$DBG" 2>/dev/null | tail -n 1; }
 hdmi_msg() { # $1 = codec, $2 = immersive
   case "$1" in
     mat_atmos*|matatmos*|mat*) echo "Dolby Atmos" ;;
