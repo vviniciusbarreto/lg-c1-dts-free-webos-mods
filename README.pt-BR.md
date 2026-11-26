@@ -16,8 +16,14 @@ Testado numa LG OLED C1 (webOS 6, GStreamer 1.16) com soundbar no eARC.
   para "HDR" e "Dolby Vision", com a mesma animação e duração (é o próprio aviso do sistema, tipo `light`):
   - "DTS Digital Surround" quando o DTS vai direto para o receiver (ou "DTS Digital Surround (TV)" se a TV decodificar);
   - "Dolby Digital" (AC3), "Dolby Digital Plus" (E-AC3) e "Dolby Atmos" (E-AC3 com Atmos).
-  O selo entra depois do selo HDR/Dolby Vision da LG, nunca por cima.
-  Vale também para as entradas HDMI (ex.: um console mandando Dolby Atmos em passthrough, que a LG não avisa).
+  O selo entra depois do selo HDR/Dolby Vision da LG, nunca por cima, pela própria fila de avisos do sistema.
+  Vale também para as entradas HDMI (ex.: um console mandando Dolby Atmos em passthrough, que a LG não avisa),
+  inclusive quando a LG mostra o HDR de novo sem o áudio mudar (console reiniciando, TV saindo do standby).
+  Logo depois de ligar a TV o selo da entrada HDMI sai uns 20 s depois do HDR: os scripts do webosbrew só começam
+  depois que o console já apareceu.
+- **Som do YouTube depois de Dolby/Atmos.** Quando um app que toca PCM comum (o YouTube) abre logo depois de uma
+  fonte em bitstream (Dolby/Atmos em passthrough, de um app ou do HDMI), o eARC pode ficar preso em bitstream e o
+  app fica mudo. O script percebe e desliga e religa o eARC uma vez (o som some por ~3 s).
 - **Correção do eARC depois do boot.** Em algumas TVs, depois de um boot completo, o eARC conecta sem concluir
   a sincronia com a soundbar e o DTS em passthrough vira chiado. Desligar e religar "Compatibilidade com eARC"
   resolve; o script faz isso sozinho ~1 min depois do boot (o som some por ~3 s uma vez) e confere no log.
@@ -61,16 +67,23 @@ Coloque o `dts_icon.png` ao lado do `install.sh` antes de instalar. Sem ele, o s
 | Todos os selos | `touch /var/lib/webosbrew/dts_badge/disabled` |
 | Só os selos Dolby | `touch /var/lib/webosbrew/dts_badge/disabled_dolby` |
 | Só os selos das entradas HDMI | `touch /var/lib/webosbrew/dts_badge/disabled_hdmi` |
-| Correção do eARC | `touch /var/lib/webosbrew/dts_badge/disabled_earc_fix` |
+| Correção do eARC no boot | `touch /var/lib/webosbrew/dts_badge/disabled_earc_fix` |
+| Correção do som do YouTube | `touch /var/lib/webosbrew/dts_badge/disabled_pcm_fix` |
 
-Logs: `/tmp/dts_badge.log`, `/tmp/earc_fix.log`.
+Logs: `/run/dts_badge/dts_badge.log`, `/run/dts_badge/earc_fix.log` (pasta só do root; somem no reboot).
 
 ## Como funciona
 
 - O selo nativo da LG é um `luna://com.webos.notification/createToast` com `"type":"light"` (é o que o
   `pqcontroller` usa para HDR/Dolby Vision). O script usa o mesmo aviso, com outro ícone e texto.
 - DTS: lê a decisão que o dtsdec do dts_restore_plus grava em `/run/dtsc1/last-decision`.
-- Dolby: lê as linhas `setDecodeInfo` de áudio do `/tmp/var/log/dbg-log` (`codec` e `immersive`).
+- Dolby: lê as linhas `setDecodeInfo` de áudio do `/tmp/var/log/dbg-log` (`codec`). AC3 é sempre "Dolby Digital";
+  no E-AC3, o Atmos vem da informação da faixa escolhida (`handleAudioTrackInfoEvent … ATMOS/none`), porque na troca
+  de faixa o `immersive` do `setDecodeInfo` ainda é o da faixa anterior. O log é lido inteiro, mais o fim do
+  arquivo anterior logo depois de cada rotação.
+- HDMI: segue as linhas `setAudioInputInfo` do `audiooutputd` e os avisos HDR/Dolby Vision do `pqcontroller`.
+- Som do YouTube: quando o Chromium abre o áudio (`PcmPrepare`) depois que uma fonte em bitstream terminou e o eARC
+  ficou em bitstream (`setEArcOutputType … mixer value is 0`), alterna `eArcSupport`.
 - eARC: alterna `eArcSupport` por `com.webos.settingsservice/setSystemSettings` e confere
   `audioDeviceType[sound_mode_sync]` nas mensagens do `arccontroller`.
 - Todos os scripts de inicialização saem sempre com 0, para não acionar o modo de segurança do webosbrew.

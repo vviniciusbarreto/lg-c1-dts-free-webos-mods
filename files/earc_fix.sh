@@ -5,11 +5,15 @@
 # Turn off: touch /var/lib/webosbrew/dts_badge/disabled_earc_fix
 DIR=/var/lib/webosbrew/dts_badge
 DBG=/tmp/var/log/dbg-log
-LOG=/tmp/earc_fix.log
+RUN=/run/dts_badge   # root-only place for runtime files (/tmp is writable by every app on the TV)
+mkdir -p "$RUN" && chmod 700 "$RUN"
+LOG=$RUN/earc_fix.log
 log() { echo "$(date -u '+%F %T') $*" >> "$LOG"; }
 get() { timeout -t 10 luna-send -n 1 luna://com.webos.settingsservice/getSystemSettings "{\"category\":\"sound\",\"keys\":[\"$1\"]}" </dev/null 2>/dev/null | sed -n "s/.*\"$1\" *: *\"\([^\"]*\)\".*/\1/p"; }
 set_earc() { timeout -t 10 luna-send -n 1 luna://com.webos.settingsservice/setSystemSettings "{\"category\":\"sound\",\"settings\":{\"eArcSupport\":\"$1\"}}" </dev/null 2>&1; }
-synced() { tail -n 3000 "$DBG" 2>/dev/null | grep "sendArcState" | tail -n 1 | grep -q "arcActivation\[eARC\].*audioDeviceType\[sound_mode_sync\]"; }
+# The dbg-log gets hundreds of lines a second at times and rotates at ~2 MB, so read all of it plus the tail
+# of the previous one (a short tail missed lines twice in the badge script).
+synced() { { zcat "$DBG.0.gz" 2>/dev/null | tail -n 3000; cat "$DBG" 2>/dev/null; } | grep "sendArcState" | tail -n 1 | grep -q "arcActivation\[eARC\].*audioDeviceType\[sound_mode_sync\]"; }
 
 [ -f "$DIR/disabled_earc_fix" ] && { log "disabled (disabled_earc_fix)"; exit 0; }
 log "started (pid $$)"

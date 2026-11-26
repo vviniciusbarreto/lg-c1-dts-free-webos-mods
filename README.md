@@ -16,8 +16,13 @@ Tested on an LG OLED C1 (webOS 6, GStreamer 1.16) with a soundbar on eARC.
   "Dolby Vision", with the same animation and duration (it is the system toast itself, type `light`):
   - "DTS Digital Surround" when DTS goes straight to the receiver ("DTS Digital Surround (TV)" if the TV decodes it);
   - "Dolby Digital" (AC3), "Dolby Digital Plus" (E-AC3) and "Dolby Atmos" (E-AC3 with Atmos).
-  The badge always comes after LG's HDR/Dolby Vision badge, never over it.
-  It also works for HDMI inputs (e.g. a console sending Dolby Atmos in passthrough, which LG itself does not badge).
+  The badge always comes after LG's HDR/Dolby Vision badge, never over it, through the system's own toast queue.
+  It also works for HDMI inputs (e.g. a console sending Dolby Atmos in passthrough, which LG itself does not badge),
+  including when LG shows HDR again with the audio unchanged (console restart, TV back from standby).
+  Right after power-on the HDMI badge comes ~20 s after HDR: webosbrew's scripts start after the console is up.
+- **YouTube sound after Dolby/Atmos.** When an app that plays plain PCM (YouTube) opens right after a bitstream
+  source (Dolby/Atmos passthrough, from an app or HDMI), eARC can stay in bitstream and the app is silent. The
+  script notices and toggles eARC off and on once (sound drops for ~3 s).
 - **Post-boot eARC fix.** On some sets, after a cold boot the eARC link comes up without finishing the sync
   with the soundbar, and DTS passthrough turns into loud noise. Toggling "eARC Support" off and on fixes it;
   the script does that once, about a minute after boot (sound drops for ~3 s), and checks the result in the log.
@@ -61,16 +66,23 @@ Put `dts_icon.png` next to `install.sh` before installing. Without it the DTS ba
 | All badges | `touch /var/lib/webosbrew/dts_badge/disabled` |
 | Dolby badges only | `touch /var/lib/webosbrew/dts_badge/disabled_dolby` |
 | HDMI input badges only | `touch /var/lib/webosbrew/dts_badge/disabled_hdmi` |
-| eARC fix | `touch /var/lib/webosbrew/dts_badge/disabled_earc_fix` |
+| Post-boot eARC fix | `touch /var/lib/webosbrew/dts_badge/disabled_earc_fix` |
+| YouTube sound fix | `touch /var/lib/webosbrew/dts_badge/disabled_pcm_fix` |
 
-Logs: `/tmp/dts_badge.log`, `/tmp/earc_fix.log`.
+Logs: `/run/dts_badge/dts_badge.log`, `/run/dts_badge/earc_fix.log` (root-only folder; cleared at reboot).
 
 ## How it works
 
 - LG's native badge is a `luna://com.webos.notification/createToast` with `"type":"light"` (what
   `pqcontroller` uses for HDR/Dolby Vision). The script uses the same toast with its own icon and text.
 - DTS: reads the decision dts_restore_plus' dtsdec writes to `/run/dtsc1/last-decision`.
-- Dolby: reads the audio `setDecodeInfo` lines in `/tmp/var/log/dbg-log` (`codec`, `immersive`).
+- Dolby: reads the audio `setDecodeInfo` lines in `/tmp/var/log/dbg-log` (`codec`). AC3 is always "Dolby Digital";
+  for E-AC3, Atmos comes from the selected track's info (`handleAudioTrackInfoEvent … ATMOS/none`), because on a
+  track change the `immersive` in `setDecodeInfo` is still the previous track's. The whole log is read, plus the
+  tail of the previous one right after each rotation.
+- HDMI: follows `audiooutputd`'s `setAudioInputInfo` lines and `pqcontroller`'s HDR/Dolby Vision toasts.
+- YouTube sound: when Chromium opens audio (`PcmPrepare`) after a bitstream source ended and eARC was left in
+  bitstream (`setEArcOutputType … mixer value is 0`), toggles `eArcSupport`.
 - eARC: toggles `eArcSupport` through `com.webos.settingsservice/setSystemSettings` and checks for
   `audioDeviceType[sound_mode_sync]` in `arccontroller` messages.
 - Every startup hook always exits 0, so webosbrew's failsafe is never tripped.

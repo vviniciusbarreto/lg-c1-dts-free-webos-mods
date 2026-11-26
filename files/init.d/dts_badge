@@ -1,7 +1,8 @@
 #!/bin/sh
-# Starts the audio badge watcher (once). Always exits 0: a failing init.d hook trips webosbrew's failsafe.
-P=$(cat /tmp/dts_badge.pid 2>/dev/null)
-if [ -n "$P" ] && kill -0 "$P" 2>/dev/null; then exit 0; fi
+# Starts the audio badge watcher. The watcher itself stops any older copy, so a second start just replaces it.
+# Always exits 0: a failing init.d hook trips webosbrew's failsafe.
+P=$(cat /run/dts_badge/dts_badge.pid 2>/dev/null)
+if [ -n "$P" ] && tr '\0' ' ' < "/proc/$P/cmdline" 2>/dev/null | grep -q '^/bin/sh /var/lib/webosbrew/dts_badge/dts_badge.sh'; then exit 0; fi
 [ -x /var/lib/webosbrew/dts_badge/dts_badge.sh ] || exit 0
 setsid nohup /var/lib/webosbrew/dts_badge/dts_badge.sh </dev/null >/dev/null 2>&1 &
 exit 0

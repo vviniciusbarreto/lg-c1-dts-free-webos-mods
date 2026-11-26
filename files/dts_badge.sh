@@ -6,19 +6,24 @@
 #  - HDMI inputs (e.g. a console): follows audiooutputd's "setAudioInputInfo" lines (sourceType HDMI).
 # Turn Dolby badges off:    touch /var/lib/webosbrew/dts_badge/disabled_dolby
 # Turn HDMI badges off:     touch /var/lib/webosbrew/dts_badge/disabled_hdmi
+#  - PCM after bitstream: re-syncs eARC when an app that plays plain PCM (YouTube) starts right after a
+#    bitstream source (Dolby / Atmos passthrough) ended, because the link can stay in bitstream and mute it.
+# Turn that fix off:        touch /var/lib/webosbrew/dts_badge/disabled_pcm_fix
 DIR=/var/lib/webosbrew/dts_badge
 DEC=/run/dtsc1/last-decision
 DBG=/tmp/var/log/dbg-log
-LOG=/tmp/dts_badge.log
+RUN=/run/dts_badge   # runtime files: a root-only place (/tmp is writable by every app on the TV)
+mkdir -p "$RUN" && chmod 700 "$RUN"
+LOG=$RUN/dts_badge.log
 ICON=$DIR/dts_icon.png
 DOLBY_ICON=/usr/share/pqcontroller/images/light_toast_icon_dolby.png   # LG's own icon, already on the TV
-PIDF=/tmp/dts_badge.pid
+PIDF=$RUN/dts_badge.pid
 
 # The dbg-log rotates at ~2 MB (every few minutes while something plays). A line written just before a
 # rotation is only in dbg-log.0.gz, so while the current file is still small its predecessor's tail is
 # read too (unpacked once per rotation into $PREV). Without this a console change at 04:33:56 was lost:
 # the log rotated at 04:33:57.
-PREV=/tmp/dts_badge.prev
+PREV=$RUN/dbg-log.prev
 dbg_cat() {
   if [ "$(wc -c < "$DBG" 2>/dev/null || echo 0)" -lt 800000 ] && [ -f "$DBG.0.gz" ]; then
     k=$(ls -l "$DBG.0.gz" 2>/dev/null)
@@ -118,9 +123,28 @@ track_immersive() { # $1 = the setDecodeInfo line
     | sed -n 's/.* \([A-Za-z][A-Za-z]*\)\]"}.*/\1/p' | tail -n 1
 }
 
+# --- PCM after bitstream ---
+# Seen on 26/11: after the PS5 (Dolby Atmos/MAT, eARC "codec type 7") or a Stremio E-AC3 track ("codec
+# type 5") the TV left the eARC output in bitstream (setEArcOutputType ... mixer value is 0) when that
+# source ended; YouTube then played PCM (Chromium, ALSA: "PcmPrepare") with no sound. Toggling eArcSupport
+# off/on put the link back to PCM ("codec type: 1 ... mixer value is 1") and the sound came back at once.
+earc_toggle() {
+  timeout -t 10 luna-send -n 1 luna://com.webos.settingsservice/setSystemSettings '{"category":"sound","settings":{"eArcSupport":"off"}}' </dev/null >/dev/null 2>&1
+  sleep 3
+  timeout -t 10 luna-send -n 1 luna://com.webos.settingsservice/setSystemSettings '{"category":"sound","settings":{"eArcSupport":"on"}}' </dev/null 2>&1
+}
+earc_type_line() { dbg_cat | grep 'setEArcOutputType.*set codec type' | tail -n 1; }
+
 last_audio_line() { dbg_cat | grep "avc.main setDecodeInfo" | grep "contentType\[audio\]" | tail -n 1; }
 field() { echo "$1" | grep -o "$2[^,}]*" | head -n 1 | sed "s/$2//; s/[^a-zA-Z0-9]//g"; }   # codec / immersive
 
+# Only one watcher: stop any other copy (an older one left by a reinstall would double every badge).
+for p in /proc/[0-9]*; do
+  q=${p#/proc/}; [ "$q" = "$$" ] && continue
+  case "$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null)" in
+    "/bin/sh /var/lib/webosbrew/dts_badge/dts_badge.sh"*) kill "$q" 2>/dev/null ;;
+  esac
+done
 echo $$ > "$PIDF"
 log "started (pid $$)"
 
@@ -142,6 +166,7 @@ if [ -n "$lh" ] && newer "$(up_of "$lh")" "$(up_of "$la")"; then
   hdmi_state="$(echo "$lh" | sed -n 's/.*"contentType":"\(hdmi[0-9]*\)".*/\1/p'):$(hdmi_msg "$(field "$lh" codec)" "$(field "$lh" immersive)")"; hdmi_state_up=$(up_of "$lh")
 fi
 last_nat=$(line_up "$HDR_TOAST" 0)
+last_pcm=$(line_up 'alsa-wrapper.*PcmPrepare' 0); pcm_fixed_for=""
 # Right after a boot this watcher starts ~45 s in (webosbrew runs init.d late), but a console on HDMI
 # comes up at ~25 s with LG's HDR badge, before we exist. Show that input's badge once now, late but there.
 hin=${hdmi_state%%:*}; hmsg=${hdmi_state#*:}
@@ -269,6 +294,26 @@ while :; do
         icon=$DOLBY_ICON; [ "$hmsg" = "DTS Digital Surround" ] && icon=$ICON
         log "hdmi [$hin, LG badge again at $nat, audio unchanged] -> '$hmsg' : $(toast "$hmsg" "$icon")"
         hdmi_shown="$hin:$hmsg"; hdmi_shown_at=$(date +%s); our_up=$(up_now)
+      fi
+    fi
+  fi
+  # --- PCM after bitstream (see earc_toggle) ---
+  pcm=$(line_up 'alsa-wrapper.*PcmPrepare' 0)
+  if [ -n "$pcm" ] && [ "$pcm" != "$last_pcm" ]; then
+    last_pcm="$pcm"
+    et=$(earc_type_line); etu=$(up_of "$et")
+    dis=$(line_up 'UMI/disconnect' 0)
+    case "$et" in
+      *"mixer value is 0"*) bits=1 ;;
+      *) bits=0 ;;
+    esac
+    case "$et" in *"codec type: 1 "*) bits=0 ;; esac   # PCM (multichannel) is not bitstream
+    if [ $bits = 1 ] && [ -n "$dis" ] && newer "$dis" "$etu" && newer "$pcm" "$dis" && [ "$dis" != "$pcm_fixed_for" ]; then
+      pcm_fixed_for="$dis"
+      if [ -f "$DIR/disabled_pcm_fix" ]; then
+        log "pcm: PCM app after bitstream (eARC left as: ${et##*set codec type: }) - fix disabled"
+      else
+        log "pcm: PCM app after bitstream (eARC left as: ${et##*set codec type: }) -> eARC off/on : $(earc_toggle)"
       fi
     fi
   fi

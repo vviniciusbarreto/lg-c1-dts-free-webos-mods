@@ -23,7 +23,7 @@ else echo "Note: no dts_icon.png next to install.sh; the DTS badge will show tex
 
 for f in 00-dts-early dts_badge earc_fix; do cp -f "$HERE/files/init.d/$f" "$I/$f"; chmod 755 "$I/$f"; done
 
-# start the badge watcher now (the eARC fix only makes sense at boot)
-P=$(cat /tmp/dts_badge.pid 2>/dev/null); [ -n "$P" ] && kill "$P" 2>/dev/null || true
-"$I/dts_badge"
-echo "Installed. Badge watcher log: /tmp/dts_badge.log  |  eARC fix log (after next boot): /tmp/earc_fix.log"
+# (re)start the badge watcher now; a new one stops any running copy (the eARC fix only makes sense at boot)
+rm -f /run/dts_badge/dts_badge.pid
+setsid nohup "$D/dts_badge.sh" </dev/null >/dev/null 2>&1 &
+echo "Installed. Logs: /run/dts_badge/dts_badge.log  |  eARC fix (after next boot): /run/dts_badge/earc_fix.log"
