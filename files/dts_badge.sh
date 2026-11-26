@@ -109,6 +109,15 @@ atmos_shown_by_lg() { [ "$(line_age 'NOTIFY_INVOKE.*SOURCE_ID":"com.webos.servic
 # then it is already on screen / queued behind that HDR and ours would only repeat it.
 lg_atmos_after() { a=$(line_up 'NOTIFY_INVOKE.*SOURCE_ID":"com.webos.service.audio".*CONTENT":"[^"]*Atmos' 0); [ -n "$a" ] && newer "$a" "$1"; }
 
+# Per-track Atmos flag of the audio track this pipeline plays now: last SELECT_TRACK (audio) of the
+# pipeline (index 0 if none), then the last handleAudioTrackInfoEvent of that track that carries a flag.
+track_immersive() { # $1 = the setDecodeInfo line
+  uid=$(echo "$1" | sed -n 's/.*"uid":"\([^"]*\)".*/\1/p'); [ -z "$uid" ] && return
+  idx=$(dbg_cat | grep "SELECT_TRACK" | grep "$uid" | grep 'audio' | tail -n 1 | sed -n 's/.*index[^0-9]*\([0-9]*\).*/\1/p')
+  dbg_cat | grep "handleAudioTrackInfoEvent" | grep "$uid" | grep "trackNo\[${idx:-0}\]" \
+    | sed -n 's/.* \([A-Za-z][A-Za-z]*\)\]"}.*/\1/p' | tail -n 1
+}
+
 last_audio_line() { dbg_cat | grep "avc.main setDecodeInfo" | grep "contentType\[audio\]" | tail -n 1; }
 field() { echo "$1" | grep -o "$2[^,}]*" | head -n 1 | sed "s/$2//; s/[^a-zA-Z0-9]//g"; }   # codec / immersive
 
@@ -183,7 +192,18 @@ while :; do
           eac3|ec3|ddp) dmsg="Dolby Digital Plus" ;;
           *) dmsg="" ;;
         esac
-        if [ -n "$dmsg" ] && [ -n "$imm" ] && [ "$imm" != "none" ]; then dmsg="Dolby Atmos"; fi
+        # The "immersive" of the setDecodeInfo sent on a track change is the PREVIOUS track's (an AC3 track
+        # picked after an Atmos one showed "ac3 / atmos"). AC3 never carries Atmos; for E-AC3 the per-track
+        # info (handleAudioTrackInfoEvent ... ATMOS / none) of the selected track is the reliable source.
+        if [ "$dmsg" = "Dolby Digital Plus" ]; then
+          ti=$(track_immersive "$la")
+          case "$ti" in
+            ATMOS|atmos) dmsg="Dolby Atmos" ;;
+            none) : ;;
+            *) [ -n "$imm" ] && [ "$imm" != "none" ] && dmsg="Dolby Atmos" ;;   # track not described yet
+          esac
+          imm="$imm/track:${ti:-?}"
+        fi
         if [ -z "$dmsg" ]; then
           log "audio changed to $codec - no Dolby badge"
         elif [ "$dmsg" = "Dolby Atmos" ] && [ "$(line_age 'NOTIFY_INVOKE.*SOURCE_ID":"com.webos.service.audio".*CONTENT":"[^"]*Atmos')" -lt 15 ]; then
