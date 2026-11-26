@@ -47,10 +47,10 @@ NATIVE='NOTIFY_INVOKE.*SOURCE_ID":"com.webos.service.\(pqcontroller\|audio\)".*C
 # has been sent: the system then gives LG's 2 s and slides ours in. Sent BEFORE LG's, ours would be the
 # one cut after 2 s. So: wait for LG's badge only when one is coming, and send ours right after it.
 wait_native() { # $1 = [seconds] of the event, $2 = how long to wait (s), $3 = how far before the event LG's may be (s)
-  k=0
+  k=0; found_nat=""
   while [ $k -lt $(($2 * 4)) ]; do
     nat=$(line_up "$NATIVE" 0)
-    if [ -n "$nat" ] && awk -v a="$1" -v x="$nat" -v b="$3" 'BEGIN{ exit !(x >= a - b) }'; then usleep 300000; return; fi
+    if [ -n "$nat" ] && awk -v a="$1" -v x="$nat" -v b="$3" 'BEGIN{ exit !(x >= a - b) }'; then found_nat=$nat; usleep 300000; return; fi
     usleep 250000; k=$((k+1))
   done
 }
@@ -89,6 +89,9 @@ HDR_TOAST='NOTIFY_INVOKE.*SOURCE_ID":"com.webos.service.pqcontroller".*CONTENT":
 up_of() { echo "$1" | sed -n 's/^[^ ]* \[\([0-9.]*\)\].*/\1/p'; }
 newer() { awk -v a="${1:-0}" -v b="${2:-0}" 'BEGIN{ exit !(a > b) }'; }   # $1 > $2 (uptime seconds)
 atmos_shown_by_lg() { [ "$(line_age 'NOTIFY_INVOKE.*SOURCE_ID":"com.webos.service.audio".*CONTENT":"[^"]*Atmos')" -lt 15 ]; }
+# LG's own "Dolby Atmos" (audio service; seen on HDMI after the eARC re-sync) came AFTER [seconds] $1:
+# then it is already on screen / queued behind that HDR and ours would only repeat it.
+lg_atmos_after() { a=$(line_up 'NOTIFY_INVOKE.*SOURCE_ID":"com.webos.service.audio".*CONTENT":"[^"]*Atmos' 0); [ -n "$a" ] && newer "$a" "$1"; }
 
 last_audio_line() { grep "avc.main setDecodeInfo" "$DBG" 2>/dev/null | grep "contentType\[audio\]" | tail -n 1; }
 field() { echo "$1" | grep -o "$2[^,}]*" | head -n 1 | sed "s/$2//; s/[^a-zA-Z0-9]//g"; }   # codec / immersive
@@ -114,6 +117,16 @@ if [ -n "$lh" ] && newer "$(up_of "$lh")" "$(up_of "$la")"; then
   hdmi_state="$(echo "$lh" | sed -n 's/.*"contentType":"\(hdmi[0-9]*\)".*/\1/p'):$(hdmi_msg "$(field "$lh" codec)" "$(field "$lh" immersive)")"; hdmi_state_up=$(up_of "$lh")
 fi
 last_nat=$(line_up "$HDR_TOAST" 0)
+# Right after a boot this watcher starts ~45 s in (webosbrew runs init.d late), but a console on HDMI
+# comes up at ~25 s with LG's HDR badge, before we exist. Show that input's badge once now, late but there.
+hin=${hdmi_state%%:*}; hmsg=${hdmi_state#*:}
+if [ -n "$hmsg" ] && awk -v u="$(up_now)" -v h="$hdmi_state_up" 'BEGIN{ exit !(u < 300 && u - h < 120) }' \
+   && ! [ -f "$DIR/disabled" ] && ! [ -f "$DIR/disabled_hdmi" ] \
+   && ! { [ "$hmsg" = "Dolby Atmos" ] && lg_atmos_after "${last_nat:-$hdmi_state_up}"; }; then
+  icon=$DOLBY_ICON; [ "$hmsg" = "DTS Digital Surround" ] && icon=$ICON
+  log "hdmi [$hin at boot, before this watcher started] -> '$hmsg' : $(toast "$hmsg" "$icon")"
+  hdmi_shown="$hin:$hmsg"; hdmi_shown_at=$(date +%s); our_up=$(up_now)
+fi
 
 while :; do
   # --- DTS ---
@@ -182,17 +195,18 @@ while :; do
       :   # pcm / none: nothing to show (and it does not reset the last badge)
     elif [ -f "$DIR/disabled" ] || [ -f "$DIR/disabled_hdmi" ]; then
       log "hdmi disabled: $hin codec=$hcodec immersive=$himm"
-    elif [ "$hin:$hmsg" = "$hdmi_shown" ] && [ $((now - hdmi_shown_at)) -lt 60 ]; then
-      log "hdmi: $hin back to $hmsg within 60 s - not repeated"
     else
       wait_native "${hup:-0}" 3 8
-      if [ "$hmsg" = "Dolby Atmos" ] && [ "$(line_age 'NOTIFY_INVOKE.*SOURCE_ID":"com.webos.service.audio".*CONTENT":"[^"]*Atmos')" -lt 15 ]; then
-        log "hdmi: LG already showed an Atmos badge - nothing to do ($hin)"
+      ref=${found_nat:-$(awk -v h="${hup:-0}" 'BEGIN{ print h - 8 }')}
+      if [ -z "$found_nat" ] && [ "$hin:$hmsg" = "$hdmi_shown" ] && [ $((now - hdmi_shown_at)) -lt 60 ]; then
+        log "hdmi: $hin back to $hmsg within 60 s, no LG badge with it - not repeated"   # format flapping
+      elif [ "$hmsg" = "Dolby Atmos" ] && lg_atmos_after "$ref"; then
+        log "hdmi: LG showed its own Atmos badge after its HDR - nothing to do ($hin)"
       else
         icon=$DOLBY_ICON; [ "$hmsg" = "DTS Digital Surround" ] && icon=$ICON
         log "hdmi [$hts $hin codec=$hcodec immersive=$himm] -> '$hmsg' : $(toast "$hmsg" "$icon")"
+        hdmi_shown="$hin:$hmsg"; hdmi_shown_at=$(date +%s); our_up=$(up_now)
       fi
-      hdmi_shown="$hin:$hmsg"; hdmi_shown_at=$(date +%s); our_up=$(up_now)
     fi
   fi
   # --- HDMI: LG showed its HDR badge again but the audio did not change ---
@@ -213,8 +227,8 @@ while :; do
         log "hdmi disabled: $hin LG badge again ($hmsg)"
       elif ! newer "$nat" "$(awk -v u="$our_up" 'BEGIN{ print u + 10 }')"; then
         :   # ours went out with this LG badge already
-      elif [ "$hmsg" = "Dolby Atmos" ] && atmos_shown_by_lg; then
-        log "hdmi: LG already showed an Atmos badge - nothing to do ($hin)"
+      elif [ "$hmsg" = "Dolby Atmos" ] && lg_atmos_after "$nat"; then
+        log "hdmi: LG showed its own Atmos badge after its HDR - nothing to do ($hin)"
       else
         icon=$DOLBY_ICON; [ "$hmsg" = "DTS Digital Surround" ] && icon=$ICON
         log "hdmi [$hin, LG badge again at $nat, audio unchanged] -> '$hmsg' : $(toast "$hmsg" "$icon")"
