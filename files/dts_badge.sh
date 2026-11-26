@@ -82,6 +82,14 @@ hdmi_msg() { # $1 = codec, $2 = immersive
 
 # Whole current dbg-log (it rotates at ~1 MB): opening a film writes ~800 lines in the same second as the
 # audio line, so a short tail (it was 400 lines) lost it before the next poll and no Dolby badge came out.
+# LG's own video badge (HDR / Dolby Vision / HLG) from pqcontroller: on an HDMI input it comes back every
+# time the source re-sends its video signal (console restart, game start, TV back from standby), even
+# when the audio format did not change, so no new audio line arrives. LG then shows only "HDR".
+HDR_TOAST='NOTIFY_INVOKE.*SOURCE_ID":"com.webos.service.pqcontroller".*CONTENT":"\(HDR\|Dolby Vision\|HLG\)'
+up_of() { echo "$1" | sed -n 's/^[^ ]* \[\([0-9.]*\)\].*/\1/p'; }
+newer() { awk -v a="${1:-0}" -v b="${2:-0}" 'BEGIN{ exit !(a > b) }'; }   # $1 > $2 (uptime seconds)
+atmos_shown_by_lg() { [ "$(line_age 'NOTIFY_INVOKE.*SOURCE_ID":"com.webos.service.audio".*CONTENT":"[^"]*Atmos')" -lt 15 ]; }
+
 last_audio_line() { grep "avc.main setDecodeInfo" "$DBG" 2>/dev/null | grep "contentType\[audio\]" | tail -n 1; }
 field() { echo "$1" | grep -o "$2[^,}]*" | head -n 1 | sed "s/$2//; s/[^a-zA-Z0-9]//g"; }   # codec / immersive
 
@@ -100,6 +108,12 @@ fi
 # An audio track already playing at start: not shown.
 la=$(last_audio_line); last_audio_ts=${la%% *}
 lh=$(last_hdmi_line); last_hdmi_ts=${lh%% *}; hdmi_shown=""; hdmi_shown_at=0
+# What the HDMI input is playing now ("hdmi4:Dolby Atmos"; empty = no badge / an app is playing)
+hdmi_state=""; hdmi_state_up=0; our_up=0
+if [ -n "$lh" ] && newer "$(up_of "$lh")" "$(up_of "$la")"; then
+  hdmi_state="$(echo "$lh" | sed -n 's/.*"contentType":"\(hdmi[0-9]*\)".*/\1/p'):$(hdmi_msg "$(field "$lh" codec)" "$(field "$lh" immersive)")"; hdmi_state_up=$(up_of "$lh")
+fi
+last_nat=$(line_up "$HDR_TOAST" 0)
 
 while :; do
   # --- DTS ---
@@ -122,7 +136,7 @@ while :; do
   la=$(last_audio_line)
   ats=${la%% *}
   if [ -n "$la" ] && [ "$ats" != "$last_audio_ts" ]; then
-    last_audio_ts="$ats"
+    last_audio_ts="$ats"; hdmi_state=""   # an app is playing now
     codec=$(field "$la" codec); imm=$(field "$la" immersive)
     case "$codec" in
       ac3|eac3|ec3|ddp) dolby=1 ;;
@@ -161,6 +175,7 @@ while :; do
     hcodec=$(field "$lh" codec); himm=$(field "$lh" immersive)
     hin=$(echo "$lh" | sed -n 's/.*"contentType":"\(hdmi[0-9]*\)".*/\1/p')
     hmsg=$(hdmi_msg "$hcodec" "$himm")
+    hdmi_state="$hin:$hmsg"; hdmi_state_up=$(up_of "$lh")
     hup=$(echo "$lh" | sed -n 's/^[^ ]* \[\([0-9.]*\)\].*/\1/p')
     now=$(date +%s)
     if [ -z "$hmsg" ]; then
@@ -177,7 +192,34 @@ while :; do
         icon=$DOLBY_ICON; [ "$hmsg" = "DTS Digital Surround" ] && icon=$ICON
         log "hdmi [$hts $hin codec=$hcodec immersive=$himm] -> '$hmsg' : $(toast "$hmsg" "$icon")"
       fi
-      hdmi_shown="$hin:$hmsg"; hdmi_shown_at=$(date +%s)
+      hdmi_shown="$hin:$hmsg"; hdmi_shown_at=$(date +%s); our_up=$(up_now)
+    fi
+  fi
+  # --- HDMI: LG showed its HDR badge again but the audio did not change ---
+  nat=$(line_up "$HDR_TOAST" 0)
+  if [ -n "$nat" ] && [ "$nat" != "$last_nat" ]; then
+    last_nat="$nat"
+    usleep 1500000   # let an audio change that comes with it land first: then the block above handles it
+    lh=$(last_hdmi_line); p=$(line_up start_pipeline_init 0)
+    if [ -n "$lh" ] && [ "${lh%% *}" != "$last_hdmi_ts" ]; then
+      :   # the audio changed too: the HDMI block takes it on the next pass
+    elif [ -n "$p" ] && newer "$p" "$hdmi_state_up"; then
+      :   # an app started a video after the last HDMI audio line: not an HDMI badge
+    else
+      hin=${hdmi_state%%:*}; hmsg=${hdmi_state#*:}
+      if [ -z "$hmsg" ]; then
+        :   # pcm / no audio badge for this input, or an app is playing
+      elif [ -f "$DIR/disabled" ] || [ -f "$DIR/disabled_hdmi" ]; then
+        log "hdmi disabled: $hin LG badge again ($hmsg)"
+      elif ! newer "$nat" "$(awk -v u="$our_up" 'BEGIN{ print u + 10 }')"; then
+        :   # ours went out with this LG badge already
+      elif [ "$hmsg" = "Dolby Atmos" ] && atmos_shown_by_lg; then
+        log "hdmi: LG already showed an Atmos badge - nothing to do ($hin)"
+      else
+        icon=$DOLBY_ICON; [ "$hmsg" = "DTS Digital Surround" ] && icon=$ICON
+        log "hdmi [$hin, LG badge again at $nat, audio unchanged] -> '$hmsg' : $(toast "$hmsg" "$icon")"
+        hdmi_shown="$hin:$hmsg"; hdmi_shown_at=$(date +%s); our_up=$(up_now)
+      fi
     fi
   fi
   sleep 1
