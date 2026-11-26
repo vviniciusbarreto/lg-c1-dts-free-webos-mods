@@ -9,9 +9,9 @@
 #  - PCM after bitstream: when an app that plays plain PCM (YouTube) starts right after a bitstream source
 #    (Dolby / Atmos passthrough) ended, nudges the digital output (Auto and back, ~0.3 s) so it is not muted.
 # Turn that fix off:        touch /var/lib/webosbrew/dts_badge/disabled_pcm_fix
-#  - DTS unlock: a DTS passthrough that starts right after Atmos/MAT or PCM (PS5, YouTube fix, boot) comes out of
-#    the soundbar as noise; switching the film to its AC3 track and back to DTS while it plays fixes it.
-# Turn that fix off:        touch /var/lib/webosbrew/dts_badge/disabled_dts_unlock
+#  - DTS renderer fix: while a DTS passthrough plays, sets LG's PCM renderer "metadata type" to 0 (it scales the
+#    samples, which turns the DTS bitstream into noise) and puts the old value back when it ends.
+# Turn that fix off:        touch /var/lib/webosbrew/dts_badge/disabled_dts_renderer
 DIR=/var/lib/webosbrew/dts_badge
 DEC=/run/dtsc1/last-decision
 DBG=/tmp/var/log/dbg-log
@@ -116,7 +116,6 @@ hdmi_msg() { # $1 = codec, $2 = immersive
 HDR_TOAST='NOTIFY_INVOKE.*SOURCE_ID":"com.webos.service.pqcontroller".*CONTENT":"\(HDR\|Dolby Vision\|HLG\)'
 up_of() { echo "$1" | sed -n 's/^[^ ]* \[\([0-9.]*\)\].*/\1/p'; }
 newer() { awk -v a="${1:-0}" -v b="${2:-0}" 'BEGIN{ exit !(a > b) }'; }   # $1 > $2 (uptime seconds)
-atmos_shown_by_lg() { [ "$(line_age 'NOTIFY_INVOKE.*SOURCE_ID":"com.webos.service.audio".*CONTENT":"[^"]*Atmos')" -lt 15 ]; }
 # LG's own "Dolby Atmos" (audio service; seen on HDMI after the eARC re-sync) came AFTER [seconds] $1:
 # then it is already on screen / queued behind that HDR and ours would only repeat it.
 lg_atmos_after() { a=$(line_up 'NOTIFY_INVOKE.*SOURCE_ID":"com.webos.service.audio".*CONTENT":"[^"]*Atmos' 0); [ -n "$a" ] && newer "$a" "$1"; }
@@ -146,46 +145,75 @@ digital_nudge() {
 }
 src_line() { dbg_cat | grep "$SRC" | grep -v '"codec":"none"' | tail -n 1; }   # last audio source that carried a format
 
-# --- DTS unlock ---
-# Measured on 26/11: dts_restore_plus sends DTS passthrough as "codec type: 1 ... mixer value is 0, output Ch:6"
-# (IEC 61937 inside PCM). Every clean DTS start came right after an AC3 track ("codec type: 2") or another DTS;
-# every noisy one came after Atmos/MAT (type 7, PS5 or the PCM fix), PCM (mixer value 1) or an eARC re-sync.
-# Toggling eARC did not help; picking the film's AC3 track and going back to DTS while it plays did, at once.
-# (Done while paused it did not.) So: on such a DTS start, flip to the AC3 track and back once it is playing.
-# The previous source is read from the audio input lines (audiod): ac3 = fine; DTS from an app (codec "pcm",
-# MEDIA) = fine only if that one was clean; anything else (mat_atmos, eac3, HDMI pcm, nothing since boot) = flip.
-unlock_uid=""; unlock_until=0; dts_clean=0
-dts_unlock_check() { # $1 = the DTS setDecodeInfo line (codec pcm); prepares the flip, done later in the loop
-  [ -f "$DIR/disabled_dts_unlock" ] && return
-  uid=$(echo "$1" | sed -n 's/.*"uid":"\([^"]*\)".*/\1/p'); [ -z "$uid" ] && return
-  # the last source before this DTS: skip only this film's own DTS lines (its AC3 track still counts)
-  prev=$(dbg_cat | grep "$SRC" | grep -v '"codec":"none"' | awk -v u="$uid" 'index($0, u) && index($0, "\"codec\":\"pcm\"") { next } { l = $0 } END { print l }')
-  [ -z "$prev" ] && prev=$(zcat "$DBG.1.gz" 2>/dev/null | grep "$SRC" | grep -v '"codec":"none"' | tail -n 1)
-  pc=$(field "$prev" codec); ps=$(echo "$prev" | sed -n 's/.*"sourceType":"\([A-Z]*\)".*/\1/p')
-  case "$pc:$ps" in
-    ac3:*) log "dts: came after AC3 - nothing to do"; dts_clean=1; return ;;
-    pcm:MEDIA) [ "$dts_clean" = 1 ] && { log "dts: came after a clean DTS - nothing to do"; return; } ;;
-  esac
-  dts_clean=0
-  ac3=$(dbg_cat | grep "handleAudioTrackInfoEvent" | grep "$uid" | grep 'audio/x-ac3' | tail -n 1 | sed -n 's/.*trackNo\[\([0-9]*\)\].*/\1/p')
-  if [ -z "$ac3" ]; then log "dts: came after ${pc:-nothing}/${ps:-?} but the film has no AC3 track to unlock it"; return; fi
-  dtsi=$(dbg_cat | grep "SELECT_TRACK" | grep "$uid" | grep 'audio' | tail -n 1 | sed -n 's/.*index[^0-9]*\([0-9]*\).*/\1/p')
-  unlock_uid=$uid; unlock_ac3=$ac3; unlock_dts=${dtsi:-0}; unlock_prev="${pc:-nothing}/${ps:-?}"
-  unlock_until=$(( $(date +%s) + 600 ))
+# --- DTS renderer fix ---
+# Root cause of the DTS noise (found 26/11; same as combor/webos-dts-decoder and dts_restore_plus issue #12):
+# every app's PCM goes through LG's MS12 PCM renderer on its way to eARC, and while the renderer's
+# "metadata type" is above 1 it scales the samples (by 63/64), which turns dts_restore_plus' IEC 61937 DTS
+# into noise. Measured on the C1: Dolby Atmos/MAT from the PS5 leaves it at 3 (an AC3 track puts it back
+# to 0, which is why switching to AC3 and back "fixed" it); with 3 the DTS hissed, and writing 0 cleaned
+# it at once. So: while our DTS passthrough plays, metadata type 0; afterwards, the old value back.
+REN_STATUS=/proc/aaudio/module/PCMREN_P0/status
+REN_SET=0x64040004
+ren_c=""; ren_uid=""; ren_saved=""
+ren_type() { sed -n 's/.*Param *: *metadata type *: *\([0-9]*\).*/\1/p' "$REN_STATUS" 2>/dev/null | head -n 1; }
+ren_cmd() { # the renderer's DSP instance command file (its prop carries the module id of the status file)
+  id=$(sed -n 's/.*](\([0-9]*\)).*/\1/p' "$REN_STATUS" 2>/dev/null | head -n 1); [ -z "$id" ] && return
+  [ -n "$ren_c" ] && timeout -t 2 grep -qx "id=(int)$id" "${ren_c%/cmd}/prop" 2>/dev/null && { echo "$ren_c"; return; }
+  for d in /proc/aaudio/instances/*; do   # some instances' prop never returns: always with a timeout
+    timeout -t 2 grep -qx "id=(int)$id" "$d/prop" 2>/dev/null && { echo "$d/cmd"; return; }
+  done
+}
+ren_set() { # $1 = metadata type; true when the renderer took it
+  c=$(ren_cmd); [ -n "$c" ] || return 1; ren_c=$c
+  echo "$REN_SET $1" > "$c" 2>/dev/null || return 1
+  i=0; while [ $i -lt 10 ]; do [ "$(ren_type)" = "$1" ] && return 0; usleep 20000; i=$((i+1)); done; return 1
+}
+# The noise lasts until the value is 0, and the main loop can take seconds per pass (it greps the dbg-log),
+# so a light child process watches only dts_restore_plus' decision file, every 0.2 s, and does the write.
+# It leaves the old value in $RUN/renderer-metadata-type; the main loop ties it to the film and puts it back.
+ren_fast() {
+  lm=$(cat "$DEC" 2>/dev/null)
+  while :; do
+    m=$(cat "$DEC" 2>/dev/null)
+    if [ "$m" != "$lm" ]; then
+      lm=$m
+      case "$m" in *" passthrough"*)
+        t=$(ren_type)
+        case "$t" in ''|0|1) ;; *)
+          if [ ! -f "$DIR/disabled_dts_renderer" ] && ren_set 0; then
+            [ -f "$RUN/renderer-metadata-type" ] || echo "$t" > "$RUN/renderer-metadata-type"
+            log "dts: PCM renderer metadata type $t -> 0 at the DTS start (it turns the DTS into noise)"
+          fi ;;
+        esac ;;
+      esac
+    fi
+    usleep 200000
+  done
+}
+ren_fix() { # $1 = the DTS setDecodeInfo line; at a DTS passthrough start (main loop)
+  [ -f "$DIR/disabled_dts_renderer" ] && return
+  uid=$(echo "$1" | sed -n 's/.*"uid":"\([^"]*\)".*/\1/p')
+  if [ -z "$ren_uid" ] && [ -f "$RUN/renderer-metadata-type" ]; then   # the fast watcher already did it
+    ren_uid=$uid; ren_saved=$(cat "$RUN/renderer-metadata-type"); return
+  fi
+  t=$(ren_type)
+  case "$t" in ''|0|1) [ -n "$ren_uid" ] && ren_uid=$uid; return ;; esac   # already safe
+  if ren_set 0; then
+    [ -z "$ren_saved" ] && ren_saved=$t; ren_uid=$uid; echo "$ren_saved" > "$RUN/renderer-metadata-type"
+    log "dts: PCM renderer metadata type $t -> 0 (would turn the DTS into noise)"
+  else
+    log "dts: PCM renderer metadata type is $t and could not be set to 0"
+  fi
 }
 play_state() { dbg_cat | grep 'getMediaInfo' | grep "\"mediaId\":\"$1\"" | tail -n 1 | sed -n 's/.*"mediaId":"'"$1"'","type":"media","playState":"\([a-z]*\)".*/\1/p'; }
-dts_unlock_run() {
-  [ -z "$unlock_uid" ] && return
-  st=$(play_state "$unlock_uid")
-  if [ "$st" = "unloaded" ] || [ "$(date +%s)" -gt "$unlock_until" ]; then log "dts: unlock dropped (film $st)"; unlock_uid=""; return; fi
-  [ "$st" = "playing" ] || return
-  r1=$(timeout -t 10 luna-send -n 1 luna://com.webos.media/selectTrack "{\"mediaId\":\"$unlock_uid\",\"type\":\"audio\",\"index\":$unlock_ac3}" </dev/null 2>&1 | grep -o '"returnValue":[a-z]*')
-  sleep 2
-  r2=$(timeout -t 10 luna-send -n 1 luna://com.webos.media/selectTrack "{\"mediaId\":\"$unlock_uid\",\"type\":\"audio\",\"index\":$unlock_dts}" </dev/null 2>&1 | grep -o '"returnValue":[a-z]*')
-  log "dts: came after $unlock_prev -> AC3 track $unlock_ac3 and back to DTS track $unlock_dts ($r1 $r2)"
-  unlock_uid=""; dts_clean=1
-  sleep 2   # our own track switches: no badges for them
-  last=$(cat "$DEC" 2>/dev/null); la=$(last_audio_line); last_audio_ts=${la%% *}
+ren_restore_check() { # the DTS film ended, or something else plays: put the old value back
+  [ -z "$ren_uid" ] && return
+  st=$(play_state "$ren_uid"); src=$(src_line)
+  if [ "$st" = "unloaded" ] || { [ -n "$src" ] && ! echo "$src" | grep -q "$ren_uid"; }; then
+    if [ "$(ren_type)" = 0 ] && ren_set "$ren_saved"; then log "dts: DTS ended - PCM renderer metadata type 0 -> $ren_saved"
+    else log "dts: DTS ended - PCM renderer metadata type left as $(ren_type)"; fi
+    ren_uid=""; ren_saved=""; rm -f "$RUN/renderer-metadata-type"
+  fi
 }
 
 last_audio_line() { dbg_cat | grep "avc.main setDecodeInfo" | grep "contentType\[audio\]" | tail -n 1; }
@@ -200,6 +228,18 @@ for p in /proc/[0-9]*; do
 done
 echo $$ > "$PIDF"
 log "started (pid $$)"
+# A value saved by a previous run (restart or reinstall): if its DTS film still plays, take it over (the
+# main loop puts the value back when the film ends); if not, put it back now.
+if [ -f "$RUN/renderer-metadata-type" ]; then
+  v=$(cat "$RUN/renderer-metadata-type"); src=$(src_line)
+  u=$(echo "$src" | sed -n 's/.*"pipelineId":"\([^"]*\)".*/\1/p')
+  if [ "$(field "$src" codec)" = "pcm" ] && [ -n "$u" ] && [ "$(play_state "$u")" != "unloaded" ] && [ -n "$(play_state "$u")" ]; then
+    ren_uid=$u; ren_saved=$v; log "dts: a DTS film is still playing - keeping the PCM renderer at 0 (old value $v)"
+  else
+    rm -f "$RUN/renderer-metadata-type"
+    [ "$(ren_type)" = 0 ] && [ -n "$v" ] && ren_set "$v" && log "dts: PCM renderer metadata type 0 -> $v (left by the previous run)"
+  fi
+fi
 
 # A DTS decision already there at start: only shown if recent (< 10 s).
 last=""
@@ -230,6 +270,8 @@ if [ -n "$hmsg" ] && awk -v u="$(up_now)" -v h="$hdmi_state_up" 'BEGIN{ exit !(u
   log "hdmi [$hin at boot, before this watcher started] -> '$hmsg' : $(toast "$hmsg" "$icon")"
   hdmi_shown="$hin:$hmsg"; hdmi_shown_at=$(date +%s); our_up=$(up_now)
 fi
+ren_c=$(ren_cmd)   # found once here (it can take a while), inherited by the fast watcher
+ren_fast &
 
 while :; do
   # --- DTS ---
@@ -243,8 +285,8 @@ while :; do
         *" passthrough"*) msg="DTS Digital Surround" ;;
         *) msg="DTS Digital Surround (TV)" ;;   # decoded by the TV, not passed through
       esac
-      case "$cur" in *" passthrough"*)   # unlock first (the noise lasts until then), badge after
-        dl=$(last_audio_line); [ "$(field "$dl" codec)" = "pcm" ] && { dts_unlock_check "$dl"; dts_unlock_run; } ;;
+      case "$cur" in *" passthrough"*)   # renderer first (the noise lasts until then), badge after
+        dl=$(last_audio_line); [ "$(field "$dl" codec)" = "pcm" ] && ren_fix "$dl" ;;
       esac
       smart_wait
       log "dts [$cur] -> '$msg' : $(toast "$msg" "$ICON")"
@@ -353,7 +395,7 @@ while :; do
       fi
     fi
   fi
-  dts_unlock_run
+  ren_restore_check
   # --- PCM after bitstream (see digital_nudge) ---
   pcm=$(line_up 'alsa-wrapper.*PcmPrepare' 0)
   if [ -n "$pcm" ] && [ "$pcm" != "$last_pcm" ]; then

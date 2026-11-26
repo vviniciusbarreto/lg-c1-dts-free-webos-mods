@@ -21,6 +21,12 @@ Testado numa LG OLED C1 (webOS 6, GStreamer 1.16) com soundbar no eARC.
   inclusive quando a LG mostra o HDR de novo sem o áudio mudar (console reiniciando, TV saindo do standby).
   Logo depois de ligar a TV o selo da entrada HDMI sai uns 20 s depois do HDR: os scripts do webosbrew só começam
   depois que o console já apareceu.
+- **DTS sem chiado depois de Dolby Atmos.** O renderizador de PCM da LG (todo som de app passa por ele a
+  caminho do eARC) mexe nas amostras quando o "metadata type" dele está acima de 1, e isso transforma o DTS em
+  chiado. O Dolby Atmos/MAT (ex.: PS5) deixa o ajuste em 3. Enquanto um DTS em passthrough toca, o script põe o
+  ajuste em 0 (uma vigia leve faz isso até ~0,2 s depois do início do DTS) e devolve o valor antigo quando o
+  filme termina. Mesma descoberta do [combor/webos-dts-decoder](https://github.com/combor/webos-dts-decoder) e da
+  [issue #12 do dts_restore_plus](https://github.com/josippapez/dts_restore_plus/issues/12).
 - **Som do YouTube depois de Dolby/Atmos.** Quando um app que toca PCM comum (o YouTube) abre logo depois de uma
   fonte em bitstream (Dolby/Atmos em passthrough, de um app ou do HDMI), o eARC pode ficar preso em bitstream e o
   app às vezes fica mudo. O script percebe e passa a "Saída de áudio digital" para Auto e volta para Passthrough
@@ -70,6 +76,7 @@ Coloque o `dts_icon.png` ao lado do `install.sh` antes de instalar. Sem ele, o s
 | Só os selos das entradas HDMI | `touch /var/lib/webosbrew/dts_badge/disabled_hdmi` |
 | Correção do eARC no boot | `touch /var/lib/webosbrew/dts_badge/disabled_earc_fix` |
 | Correção do som do YouTube | `touch /var/lib/webosbrew/dts_badge/disabled_pcm_fix` |
+| Correção do chiado do DTS (renderizador) | `touch /var/lib/webosbrew/dts_badge/disabled_dts_renderer` |
 
 Logs: `/run/dts_badge/dts_badge.log`, `/run/dts_badge/earc_fix.log` (pasta só do root; somem no reboot).
 
@@ -83,8 +90,12 @@ Logs: `/run/dts_badge/dts_badge.log`, `/run/dts_badge/earc_fix.log` (pasta só d
   de faixa o `immersive` do `setDecodeInfo` ainda é o da faixa anterior. O log é lido inteiro, mais o fim do
   arquivo anterior logo depois de cada rotação.
 - HDMI: segue as linhas `setAudioInputInfo` do `audiooutputd` e os avisos HDR/Dolby Vision do `pqcontroller`.
-- Som do YouTube: quando o Chromium abre o áudio (`PcmPrepare`) depois que uma fonte em bitstream terminou e o eARC
-  ficou em bitstream (`setEArcOutputType … mixer value is 0`), muda `soundOutputDigital` para `auto` e volta para `passThrough`.
+- Som do YouTube: quando o Chromium abre o áudio (`PcmPrepare`) logo depois que uma fonte em bitstream (AC3, E-AC3,
+  MAT) terminou, muda `soundOutputDigital` para `auto` e volta para `passThrough`.
+- Renderizador do DTS: lê `/proc/aaudio/module/PCMREN_P0/status` ("Param : metadata type") e escreve
+  `0x64040004 <tipo>` no arquivo de comando da instância do renderizador em `/proc/aaudio/instances`.
+- As entradas de áudio são lidas das chamadas `setQualityAttribute` do `audiod`: o serviço de log da TV pode bloquear
+  as mensagens do `audiooutputd` quando ele registra demais (`NL_LOG_BLOCKED`).
 - eARC: alterna `eArcSupport` por `com.webos.settingsservice/setSystemSettings` e confere
   `audioDeviceType[sound_mode_sync]` nas mensagens do `arccontroller`.
 - Todos os scripts de inicialização saem sempre com 0, para não acionar o modo de segurança do webosbrew.
