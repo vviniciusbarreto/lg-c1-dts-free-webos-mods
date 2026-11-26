@@ -14,6 +14,22 @@ ICON=$DIR/dts_icon.png
 DOLBY_ICON=/usr/share/pqcontroller/images/light_toast_icon_dolby.png   # LG's own icon, already on the TV
 PIDF=/tmp/dts_badge.pid
 
+# The dbg-log rotates at ~2 MB (every few minutes while something plays). A line written just before a
+# rotation is only in dbg-log.0.gz, so while the current file is still small its predecessor's tail is
+# read too (unpacked once per rotation into $PREV). Without this a console change at 04:33:56 was lost:
+# the log rotated at 04:33:57.
+PREV=/tmp/dts_badge.prev
+dbg_cat() {
+  if [ "$(wc -c < "$DBG" 2>/dev/null || echo 0)" -lt 800000 ] && [ -f "$DBG.0.gz" ]; then
+    k=$(ls -l "$DBG.0.gz" 2>/dev/null)
+    if [ "$k" != "$(cat "$PREV.key" 2>/dev/null)" ]; then
+      zcat "$DBG.0.gz" 2>/dev/null | tail -n 3000 > "$PREV.tmp" && mv -f "$PREV.tmp" "$PREV"; echo "$k" > "$PREV.key"
+    fi
+    cat "$PREV" 2>/dev/null
+  fi
+  cat "$DBG" 2>/dev/null
+}
+
 log() { # the log lives in /tmp; past 64 KB only its tail is kept
   [ -f "$LOG" ] && [ "$(wc -c < "$LOG")" -gt 65536 ] && { tail -n 200 "$LOG" > "$LOG.tmp" && mv -f "$LOG.tmp" "$LOG"; }
   echo "$(date -u '+%F %T') $*" >> "$LOG"; }
@@ -25,7 +41,7 @@ toast() { # $1 = text, $2 = icon (without the icon file the badge shows text onl
 }
 
 line_age() { # $1 = pattern; age in seconds of the last dbg-log line matching it (999 if none)
-  l=$(grep "$1" "$DBG" 2>/dev/null | tail -n 1)
+  l=$(dbg_cat | grep "$1" | tail -n 1)
   [ -z "$l" ] && l=$(zcat "$DBG.0.gz" 2>/dev/null | grep "$1" | tail -n 1)   # the dbg-log rotates often
   [ -z "$l" ] && { echo 999; return; }
   t=$(echo "$l" | cut -c1-19 | tr T " ")
@@ -35,7 +51,7 @@ line_age() { # $1 = pattern; age in seconds of the last dbg-log line matching it
 # Reference clock: the [seconds] field of every dbg-log line is the same clock as /proc/uptime.
 up_now() { cut -d' ' -f1 /proc/uptime; }
 line_up() { # $1 = pattern, $2 = 1 to also search dbg-log.0.gz; prints the [seconds] of the last matching line
-  l=$(grep "$1" "$DBG" 2>/dev/null | tail -n 1)   # whole file: a film opening writes ~800 lines in one second
+  l=$(dbg_cat | grep "$1" | tail -n 1)   # whole file: a film opening writes ~800 lines in one second
   [ -z "$l" ] && [ "$2" = 1 ] && l=$(zcat "$DBG.0.gz" 2>/dev/null | grep "$1" | tail -n 1)
   [ -n "$l" ] && echo "$l" | sed -n 's/^[^ ]* \[\([0-9.]*\)\].*/\1/p'
 }
@@ -55,7 +71,7 @@ wait_native() { # $1 = [seconds] of the event, $2 = how long to wait (s), $3 = h
   done
 }
 video_is_sdr() { # the last video setDecodeInfo after the event says "none" (no HDR / DV): LG shows no badge
-  grep "avc.main setDecodeInfo" "$DBG" 2>/dev/null | grep "contentType\[video\]" | tail -n 1 | grep -q '\\"none\\",\\"nonAdaptive\\"'
+  dbg_cat | grep "avc.main setDecodeInfo" | grep "contentType\[video\]" | tail -n 1 | grep -q '\\"none\\",\\"nonAdaptive\\"'
 }
 smart_wait() {
   # Films (apps): a new pipeline (< 20 s ago) gets LG's HDR / Dolby Vision badge unless the video is SDR;
@@ -69,7 +85,7 @@ smart_wait() {
 
 # HDMI inputs: no pipeline / track events there; LG's HDR / DV badge for the input comes when the input
 # (re)starts, from a few seconds before the audio format change to ~3 s after it.
-last_hdmi_line() { grep 'audiooutputd.*setQualityAttribute request.*categoryInfo.*"sourceType":"HDMI"' "$DBG" 2>/dev/null | tail -n 1; }
+last_hdmi_line() { dbg_cat | grep 'audiooutputd.*setQualityAttribute request.*categoryInfo.*"sourceType":"HDMI"' | tail -n 1; }
 hdmi_msg() { # $1 = codec, $2 = immersive
   case "$1" in
     mat_atmos*|matatmos*|mat*) echo "Dolby Atmos" ;;
@@ -93,7 +109,7 @@ atmos_shown_by_lg() { [ "$(line_age 'NOTIFY_INVOKE.*SOURCE_ID":"com.webos.servic
 # then it is already on screen / queued behind that HDR and ours would only repeat it.
 lg_atmos_after() { a=$(line_up 'NOTIFY_INVOKE.*SOURCE_ID":"com.webos.service.audio".*CONTENT":"[^"]*Atmos' 0); [ -n "$a" ] && newer "$a" "$1"; }
 
-last_audio_line() { grep "avc.main setDecodeInfo" "$DBG" 2>/dev/null | grep "contentType\[audio\]" | tail -n 1; }
+last_audio_line() { dbg_cat | grep "avc.main setDecodeInfo" | grep "contentType\[audio\]" | tail -n 1; }
 field() { echo "$1" | grep -o "$2[^,}]*" | head -n 1 | sed "s/$2//; s/[^a-zA-Z0-9]//g"; }   # codec / immersive
 
 echo $$ > "$PIDF"
