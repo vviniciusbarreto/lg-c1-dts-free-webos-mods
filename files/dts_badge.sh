@@ -25,7 +25,7 @@ toast() { # $1 = text, $2 = icon (without the icon file the badge shows text onl
 }
 
 line_age() { # $1 = pattern; age in seconds of the last dbg-log line matching it (999 if none)
-  l=$(tail -n 3000 "$DBG" 2>/dev/null | grep "$1" | tail -n 1)
+  l=$(grep "$1" "$DBG" 2>/dev/null | tail -n 1)
   [ -z "$l" ] && l=$(zcat "$DBG.0.gz" 2>/dev/null | grep "$1" | tail -n 1)   # the dbg-log rotates often
   [ -z "$l" ] && { echo 999; return; }
   t=$(echo "$l" | cut -c1-19 | tr T " ")
@@ -35,7 +35,7 @@ line_age() { # $1 = pattern; age in seconds of the last dbg-log line matching it
 # Reference clock: the [seconds] field of every dbg-log line is the same clock as /proc/uptime.
 up_now() { cut -d' ' -f1 /proc/uptime; }
 line_up() { # $1 = pattern, $2 = 1 to also search dbg-log.0.gz; prints the [seconds] of the last matching line
-  l=$(tail -n 3000 "$DBG" 2>/dev/null | grep "$1" | tail -n 1)
+  l=$(grep "$1" "$DBG" 2>/dev/null | tail -n 1)   # whole file: a film opening writes ~800 lines in one second
   [ -z "$l" ] && [ "$2" = 1 ] && l=$(zcat "$DBG.0.gz" 2>/dev/null | grep "$1" | tail -n 1)
   [ -n "$l" ] && echo "$l" | sed -n 's/^[^ ]* \[\([0-9.]*\)\].*/\1/p'
 }
@@ -55,7 +55,7 @@ wait_native() { # $1 = [seconds] of the event, $2 = how long to wait (s), $3 = h
   done
 }
 video_is_sdr() { # the last video setDecodeInfo after the event says "none" (no HDR / DV): LG shows no badge
-  tail -n 3000 "$DBG" 2>/dev/null | grep "avc.main setDecodeInfo" | grep "contentType\[video\]" | tail -n 1 | grep -q '\\"none\\",\\"nonAdaptive\\"'
+  grep "avc.main setDecodeInfo" "$DBG" 2>/dev/null | grep "contentType\[video\]" | tail -n 1 | grep -q '\\"none\\",\\"nonAdaptive\\"'
 }
 smart_wait() {
   # Films (apps): a new pipeline (< 20 s ago) gets LG's HDR / Dolby Vision badge unless the video is SDR;
@@ -69,7 +69,7 @@ smart_wait() {
 
 # HDMI inputs: no pipeline / track events there; LG's HDR / DV badge for the input comes when the input
 # (re)starts, from a few seconds before the audio format change to ~3 s after it.
-last_hdmi_line() { tail -n 3000 "$DBG" 2>/dev/null | grep 'audiooutputd.*setQualityAttribute request.*categoryInfo.*"sourceType":"HDMI"' | tail -n 1; }
+last_hdmi_line() { grep 'audiooutputd.*setQualityAttribute request.*categoryInfo.*"sourceType":"HDMI"' | tail -n 1; }
 hdmi_msg() { # $1 = codec, $2 = immersive
   case "$1" in
     mat_atmos*|matatmos*|mat*) echo "Dolby Atmos" ;;
@@ -80,7 +80,9 @@ hdmi_msg() { # $1 = codec, $2 = immersive
   esac
 }
 
-last_audio_line() { tail -n 400 "$DBG" 2>/dev/null | grep "avc.main setDecodeInfo" | grep "contentType\[audio\]" | tail -n 1; }
+# Whole current dbg-log (it rotates at ~1 MB): opening a film writes ~800 lines in the same second as the
+# audio line, so a short tail (it was 400 lines) lost it before the next poll and no Dolby badge came out.
+last_audio_line() { grep "avc.main setDecodeInfo" "$DBG" 2>/dev/null | grep "contentType\[audio\]" | tail -n 1; }
 field() { echo "$1" | grep -o "$2[^,}]*" | head -n 1 | sed "s/$2//; s/[^a-zA-Z0-9]//g"; }   # codec / immersive
 
 echo $$ > "$PIDF"
@@ -130,7 +132,7 @@ while :; do
       if [ -f "$DIR/disabled" ] || [ -f "$DIR/disabled_dolby" ]; then
         log "dolby disabled: codec=$codec immersive=$imm"
       else
-        sleep 2   # the TV sends two lines per track change (old track, then new): the last one counts
+        usleep 500000   # the TV sends two lines per track change (old track, then new, ~20 ms apart): the last one counts
         smart_wait
         la=$(last_audio_line); [ -n "$la" ] && { last_audio_ts=${la%% *}; ats=$last_audio_ts; codec=$(field "$la" codec); imm=$(field "$la" immersive); }
         case "$codec" in
