@@ -23,7 +23,8 @@ Testado numa LG OLED C1 (webOS 6, GStreamer 1.16) com soundbar no eARC.
   depois que o console já apareceu.
 - **Som do YouTube depois de Dolby/Atmos.** Quando um app que toca PCM comum (o YouTube) abre logo depois de uma
   fonte em bitstream (Dolby/Atmos em passthrough, de um app ou do HDMI), o eARC pode ficar preso em bitstream e o
-  app fica mudo. O script percebe e desliga e religa o eARC uma vez (o som some por ~3 s).
+  app às vezes fica mudo. O script percebe e passa a "Saída de áudio digital" para Auto e volta para Passthrough
+  (~0,3 s, sem derrubar o eARC).
 - **Correção do eARC depois do boot.** Em algumas TVs, depois de um boot completo, o eARC conecta sem concluir
   a sincronia com a soundbar e o DTS em passthrough vira chiado. Desligar e religar "Compatibilidade com eARC"
   resolve; o script faz isso sozinho ~1 min depois do boot (o som some por ~3 s uma vez) e confere no log.
@@ -83,7 +84,7 @@ Logs: `/run/dts_badge/dts_badge.log`, `/run/dts_badge/earc_fix.log` (pasta só d
   arquivo anterior logo depois de cada rotação.
 - HDMI: segue as linhas `setAudioInputInfo` do `audiooutputd` e os avisos HDR/Dolby Vision do `pqcontroller`.
 - Som do YouTube: quando o Chromium abre o áudio (`PcmPrepare`) depois que uma fonte em bitstream terminou e o eARC
-  ficou em bitstream (`setEArcOutputType … mixer value is 0`), alterna `eArcSupport`.
+  ficou em bitstream (`setEArcOutputType … mixer value is 0`), muda `soundOutputDigital` para `auto` e volta para `passThrough`.
 - eARC: alterna `eArcSupport` por `com.webos.settingsservice/setSystemSettings` e confere
   `audioDeviceType[sound_mode_sync]` nas mensagens do `arccontroller`.
 - Todos os scripts de inicialização saem sempre com 0, para não acionar o modo de segurança do webosbrew.

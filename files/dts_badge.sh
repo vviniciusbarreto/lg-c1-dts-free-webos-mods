@@ -6,8 +6,8 @@
 #  - HDMI inputs (e.g. a console): follows audiooutputd's "setAudioInputInfo" lines (sourceType HDMI).
 # Turn Dolby badges off:    touch /var/lib/webosbrew/dts_badge/disabled_dolby
 # Turn HDMI badges off:     touch /var/lib/webosbrew/dts_badge/disabled_hdmi
-#  - PCM after bitstream: re-syncs eARC when an app that plays plain PCM (YouTube) starts right after a
-#    bitstream source (Dolby / Atmos passthrough) ended, because the link can stay in bitstream and mute it.
+#  - PCM after bitstream: when an app that plays plain PCM (YouTube) starts right after a bitstream source
+#    (Dolby / Atmos passthrough) ended, nudges the digital output (Auto and back, ~0.3 s) so it is not muted.
 # Turn that fix off:        touch /var/lib/webosbrew/dts_badge/disabled_pcm_fix
 DIR=/var/lib/webosbrew/dts_badge
 DEC=/run/dtsc1/last-decision
@@ -126,12 +126,16 @@ track_immersive() { # $1 = the setDecodeInfo line
 # --- PCM after bitstream ---
 # Seen on 26/11: after the PS5 (Dolby Atmos/MAT, eARC "codec type 7") or a Stremio E-AC3 track ("codec
 # type 5") the TV left the eARC output in bitstream (setEArcOutputType ... mixer value is 0) when that
-# source ended; YouTube then played PCM (Chromium, ALSA: "PcmPrepare") with no sound. Toggling eArcSupport
-# off/on put the link back to PCM ("codec type: 1 ... mixer value is 1") and the sound came back at once.
-earc_toggle() {
-  timeout -t 10 luna-send -n 1 luna://com.webos.settingsservice/setSystemSettings '{"category":"sound","settings":{"eArcSupport":"off"}}' </dev/null >/dev/null 2>&1
-  sleep 3
-  timeout -t 10 luna-send -n 1 luna://com.webos.settingsservice/setSystemSettings '{"category":"sound","settings":{"eArcSupport":"on"}}' </dev/null 2>&1
+# source ended; YouTube then played PCM (Chromium, ALSA: "PcmPrepare") with no sound, now and then. Toggling
+# eArcSupport off/on brought the sound back but moved it to the TV speakers for ~4 s while the link came back.
+# Switching "Digital Sound Output" to Auto and back to Pass Through for ~0.3 s (the TV re-applies the eARC
+# output with the mixer on: "codec type: 7 ... mixer value is 1") keeps the link up and nobody notices it.
+digital_nudge() {
+  cur=$(timeout -t 10 luna-send -n 1 luna://com.webos.settingsservice/getSystemSettings '{"category":"sound","keys":["soundOutputDigital"]}' </dev/null 2>/dev/null | sed -n 's/.*"soundOutputDigital" *: *"\([^"]*\)".*/\1/p')
+  [ "$cur" = "passThrough" ] || { echo "digital output is '$cur', not passThrough - left alone"; return; }
+  timeout -t 10 luna-send -n 1 luna://com.webos.settingsservice/setSystemSettings '{"category":"sound","settings":{"soundOutputDigital":"auto"}}' </dev/null >/dev/null 2>&1
+  usleep 300000
+  timeout -t 10 luna-send -n 1 luna://com.webos.settingsservice/setSystemSettings '{"category":"sound","settings":{"soundOutputDigital":"passThrough"}}' </dev/null 2>&1
 }
 earc_type_line() { dbg_cat | grep 'setEArcOutputType.*set codec type' | tail -n 1; }
 
@@ -297,7 +301,7 @@ while :; do
       fi
     fi
   fi
-  # --- PCM after bitstream (see earc_toggle) ---
+  # --- PCM after bitstream (see digital_nudge) ---
   pcm=$(line_up 'alsa-wrapper.*PcmPrepare' 0)
   if [ -n "$pcm" ] && [ "$pcm" != "$last_pcm" ]; then
     last_pcm="$pcm"
@@ -313,7 +317,7 @@ while :; do
       if [ -f "$DIR/disabled_pcm_fix" ]; then
         log "pcm: PCM app after bitstream (eARC left as: ${et##*set codec type: }) - fix disabled"
       else
-        log "pcm: PCM app after bitstream (eARC left as: ${et##*set codec type: }) -> eARC off/on : $(earc_toggle)"
+        log "pcm: PCM app after bitstream (eARC left as: ${et##*set codec type: }) -> digital output Auto/Pass Through : $(digital_nudge)"
       fi
     fi
   fi

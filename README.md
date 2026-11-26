@@ -21,8 +21,9 @@ Tested on an LG OLED C1 (webOS 6, GStreamer 1.16) with a soundbar on eARC.
   including when LG shows HDR again with the audio unchanged (console restart, TV back from standby).
   Right after power-on the HDMI badge comes ~20 s after HDR: webosbrew's scripts start after the console is up.
 - **YouTube sound after Dolby/Atmos.** When an app that plays plain PCM (YouTube) opens right after a bitstream
-  source (Dolby/Atmos passthrough, from an app or HDMI), eARC can stay in bitstream and the app is silent. The
-  script notices and toggles eARC off and on once (sound drops for ~3 s).
+  source (Dolby/Atmos passthrough, from an app or HDMI), eARC can stay in bitstream and the app is sometimes
+  silent. The script notices and switches "Digital Sound Output" to Auto and back to Pass Through (~0.3 s, the
+  eARC link stays up).
 - **Post-boot eARC fix.** On some sets, after a cold boot the eARC link comes up without finishing the sync
   with the soundbar, and DTS passthrough turns into loud noise. Toggling "eARC Support" off and on fixes it;
   the script does that once, about a minute after boot (sound drops for ~3 s), and checks the result in the log.
@@ -82,7 +83,7 @@ Logs: `/run/dts_badge/dts_badge.log`, `/run/dts_badge/earc_fix.log` (root-only f
   tail of the previous one right after each rotation.
 - HDMI: follows `audiooutputd`'s `setAudioInputInfo` lines and `pqcontroller`'s HDR/Dolby Vision toasts.
 - YouTube sound: when Chromium opens audio (`PcmPrepare`) after a bitstream source ended and eARC was left in
-  bitstream (`setEArcOutputType … mixer value is 0`), toggles `eArcSupport`.
+  bitstream (`setEArcOutputType … mixer value is 0`), sets `soundOutputDigital` to `auto` and back to `passThrough`.
 - eARC: toggles `eArcSupport` through `com.webos.settingsservice/setSystemSettings` and checks for
   `audioDeviceType[sound_mode_sync]` in `arccontroller` messages.
 - Every startup hook always exits 0, so webosbrew's failsafe is never tripped.
